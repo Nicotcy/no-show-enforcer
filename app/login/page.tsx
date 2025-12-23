@@ -1,0 +1,93 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+export default function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+    const router = useRouter();
+
+
+  async function signUp() {
+    setMessage(null);
+    const { error } = await supabase.auth.signUp({ email, password });
+    setMessage(
+      error
+        ? error.message
+        : "Account created. Check your email if confirmation is required."
+    );
+  }
+
+async function signIn() {
+  setMessage(null);
+
+  const { error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (error) {
+    setMessage(error.message);
+    return;
+  }
+const { data: { user }, error: userErr } = await supabase.auth.getUser();
+
+if (!userErr && user) {
+  const { error: upsertErr } = await supabase.from("profiles").upsert({
+    id: user.id,
+    business_name: null,
+    timezone: "Europe/Madrid",
+    currency: "EUR",
+    no_show_fee: 0,
+    late_cancel_fee: 0,
+    late_cancel_window_hours: 24,
+  });
+
+  if (upsertErr) {
+    setMessage(upsertErr.message);
+    return;
+  }
+}
+
+  router.push("/dashboard");
+}
+
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    setMessage("Signed out.");
+  }
+
+  return (
+    <div style={{ maxWidth: 420, margin: "40px auto", padding: 16 }}>
+      <h1>Login</h1>
+
+      <input
+        placeholder="Email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        style={{ width: "100%", marginTop: 12, padding: 10 }}
+      />
+
+      <input
+        type="password"
+        placeholder="Password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        style={{ width: "100%", marginTop: 12, padding: 10 }}
+      />
+
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={signUp}>Create account</button>
+        <button onClick={signIn}>Sign in</button>
+        <button onClick={signOut}>Sign out</button>
+      </div>
+
+      {message && <p style={{ marginTop: 12 }}>{message}</p>}
+    </div>
+  );
+}
+
