@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
@@ -16,6 +15,7 @@ export async function GET(req: Request) {
     // 2) Variables de entorno (servidor)
     const supabaseUrl =
       process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+
     const serviceRoleKey =
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
       process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY;
@@ -23,6 +23,7 @@ export async function GET(req: Request) {
     if (!supabaseUrl || !serviceRoleKey) {
       return NextResponse.json(
         {
+          step: "env-missing",
           error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
           debug: {
             hasSUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -36,52 +37,36 @@ export async function GET(req: Request) {
       );
     }
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey);
+    // ✅ TEST DIRECTO con fetch (sin supabase-js)
+    try {
+      const r = await fetch(`${supabaseUrl}/rest/v1/`, {
+        method: "GET",
+        headers: {
+          apikey: serviceRoleKey,
+          Authorization: `Bearer ${serviceRoleKey}`,
+        },
+      });
 
-    // 3) “Ahora” (en formato que entiende la DB)
-    const nowIso = new Date().toISOString();
+      const text = await r.text();
 
-    // 4) Primero contamos cuántas serían candidatas
-    const { count: candidateCount, error: countError } = await supabase
-      .from("appointments")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "scheduled")
-      .lt("starts_at", nowIso);
-
-    if (countError) {
       return NextResponse.json(
-        { step: "count-error", error: countError.message },
+        {
+          step: "supabase-ping",
+          ok: r.ok,
+          status: r.status,
+          bodyPreview: text.slice(0, 200),
+        },
+        { status: 200 }
+      );
+    } catch (e: any) {
+      return NextResponse.json(
+        {
+          step: "supabase-ping-failed",
+          error: e?.message ?? String(e),
+        },
         { status: 500 }
       );
     }
-
-    // 5) Luego actualizamos esas citas a no_show
-    const { data: updatedRows, error: updateError } = await supabase
-      .from("appointments")
-      .update({
-        status: "no_show",
-        no_show_fee_charged: false,
-      })
-      .eq("status", "scheduled")
-      .lt("starts_at", nowIso)
-      .select("id");
-
-    if (updateError) {
-      return NextResponse.json(
-        { step: "update-error", error: updateError.message },
-        { status: 500 }
-      );
-    }
-
-    const updatedIds = (updatedRows ?? []).map((r) => r.id);
-
-    return NextResponse.json({
-      step: "done",
-      now: nowIso,
-      candidateCount: candidateCount ?? 0,
-      updatedCount: updatedIds.length,
-      updatedIds,
-    });
   } catch (e: any) {
     return NextResponse.json(
       { step: "crash", error: e?.message ?? String(e) },
