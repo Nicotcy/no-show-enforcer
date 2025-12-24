@@ -10,7 +10,11 @@ export async function GET(req: Request) {
 
     // 1) Seguridad
     if (!secret || secret !== process.env.CRON_SECRET) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+            const authHeader = req.headers.get("authorization") || "";
+            const expectedHeader = `Bearer ${process.env.CRON_SECRET}`;
+      if (authHeader !== expectedHeader) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
     }
 
     // 2) Variables de entorno (servidor)
