@@ -26,10 +26,12 @@ export async function GET(req: Request) {
       );
     }
 
-    // 🔑 FIX: forzamos el fetch que usa supabase-js (sin problemas de tipos)
+    // ✅ usamos node-fetch v2 forzado (evita el fetch problemático de Vercel)
+    const nodeFetch = require("node-fetch");
+
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       global: {
-        fetch: (...args: any[]) => fetch(...(args as [any, any])),
+        fetch: nodeFetch,
       },
     });
 
@@ -70,7 +72,7 @@ export async function GET(req: Request) {
       now: nowIso,
       candidateCount: candidateCount ?? 0,
       updatedCount: updatedRows?.length ?? 0,
-      updatedIds: (updatedRows ?? []).map((r) => r.id),
+      updatedIds: (updatedRows ?? []).map((r: any) => r.id),
     });
   } catch (e: any) {
     return NextResponse.json(
