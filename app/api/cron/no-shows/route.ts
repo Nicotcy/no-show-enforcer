@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
@@ -21,69 +20,47 @@ export async function GET(req: Request) {
 
     if (!supabaseUrl || !serviceRoleKey) {
       return NextResponse.json(
-        { error: "Missing Supabase env vars" },
+        { step: "env-missing", hasUrl: !!supabaseUrl, hasKey: !!serviceRoleKey },
         { status: 500 }
       );
     }
-
-    // ✅ node-fetch puede venir como { default: fn } o como fn
-    const nodeFetchMod = require("node-fetch");
-    const nodeFetch =
-      (nodeFetchMod && nodeFetchMod.default) ? nodeFetchMod.default : nodeFetchMod;
-
-    const supabase = createClient(supabaseUrl, serviceRoleKey, {
-      global: {
-        fetch: nodeFetch,
-      },
-    });
 
     const nowIso = new Date().toISOString();
 
-    const { count: candidateCount, error: countError } = await supabase
-      .from("appointments")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "scheduled")
-      .lt("starts_at", nowIso);
+    // 👇 Consulta REST directa a la tabla (para ver error real)
+    const url =
+      `${supabaseUrl}/rest/v1/appointments` +
+      `?select=id` +
+      `&status=eq.scheduled` +
+      `&starts_at=lt.${encodeURIComponent(nowIso)}`;
 
-if (countError) {
-  return NextResponse.json(
-    {
-      step: "count-error",
-      errorMessage: countError.message,
-      errorDetails: (countError as any).details,
-      errorHint: (countError as any).hint,
-      errorCode: (countError as any).code,
-      raw: countError,
-    },
-    { status: 500 }
-  );
-}
+    try {
+      const r = await fetch(url, {
+        method: "GET",
+        headers: {
+          apikey: serviceRoleKey,
+          Authorization: `Bearer ${serviceRoleKey}`,
+        },
+      });
 
+      const text = await r.text();
 
-    const { data: updatedRows, error: updateError } = await supabase
-      .from("appointments")
-      .update({
-        status: "no_show",
-        no_show_fee_charged: false,
-      })
-      .eq("status", "scheduled")
-      .lt("starts_at", nowIso)
-      .select("id");
-
-    if (updateError) {
       return NextResponse.json(
-        { step: "update-error", error: updateError.message },
+        {
+          step: "rest-query",
+          urlPreview: url.slice(0, 120),
+          ok: r.ok,
+          status: r.status,
+          body: text.slice(0, 2000),
+        },
+        { status: 200 }
+      );
+    } catch (e: any) {
+      return NextResponse.json(
+        { step: "rest-fetch-failed", error: e?.message ?? String(e) },
         { status: 500 }
       );
     }
-
-    return NextResponse.json({
-      step: "done",
-      now: nowIso,
-      candidateCount: candidateCount ?? 0,
-      updatedCount: updatedRows?.length ?? 0,
-      updatedIds: (updatedRows ?? []).map((r: any) => r.id),
-    });
   } catch (e: any) {
     return NextResponse.json(
       { step: "crash", error: e?.message ?? String(e) },
@@ -91,3 +68,4 @@ if (countError) {
     );
   }
 }
+
