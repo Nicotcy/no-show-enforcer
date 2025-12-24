@@ -26,8 +26,10 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ usamos node-fetch v2 forzado (evita el fetch problemático de Vercel)
-    const nodeFetch = require("node-fetch");
+    // ✅ node-fetch puede venir como { default: fn } o como fn
+    const nodeFetchMod = require("node-fetch");
+    const nodeFetch =
+      (nodeFetchMod && nodeFetchMod.default) ? nodeFetchMod.default : nodeFetchMod;
 
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       global: {
