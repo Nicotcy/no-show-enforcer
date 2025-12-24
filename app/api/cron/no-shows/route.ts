@@ -45,12 +45,20 @@ export async function GET(req: Request) {
       .eq("status", "scheduled")
       .lt("starts_at", nowIso);
 
-    if (countError) {
-      return NextResponse.json(
-        { step: "count-error", error: countError.message },
-        { status: 500 }
-      );
-    }
+if (countError) {
+  return NextResponse.json(
+    {
+      step: "count-error",
+      errorMessage: countError.message,
+      errorDetails: (countError as any).details,
+      errorHint: (countError as any).hint,
+      errorCode: (countError as any).code,
+      raw: countError,
+    },
+    { status: 500 }
+  );
+}
+
 
     const { data: updatedRows, error: updateError } = await supabase
       .from("appointments")
