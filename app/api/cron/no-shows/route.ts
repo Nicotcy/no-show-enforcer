@@ -34,7 +34,9 @@ export async function GET(req: Request) {
     }
 
     let totalCandidateCount = 0;
-    l
+    let totalUpdatedCount = 0;
+    const updatedIds: string[] = [];
+
     for (const setting of settings ?? []) {
       const graceMinutes = (setting as any).grace_minutes ?? 0;
       const clinicId = (setting as any).clinic_id;
@@ -42,12 +44,15 @@ export async function GET(req: Request) {
         now.getTime() - graceMinutes * 60000
       ).toISOString();
 
+      // Count candidates for this clinic
       const { count: candidateCount, error: countError } = await supabase
         .from("appointments")
         .select("id", { count: "exact", head: true })
         .eq("clinic_id", clinicId)
         .eq("status", "scheduled")
         .eq("no_show_excused", false)
+        .is("cancelled_at", null)
+        .is("checked_in_at", null)
         .lt("starts_at", threshold);
       if (countError) {
         return NextResponse.json(
@@ -55,6 +60,7 @@ export async function GET(req: Request) {
           { status: 500 }
         );
       }
+
       totalCandidateCount += candidateCount ?? 0;
 
       if ((candidateCount ?? 0) > 0) {
@@ -64,6 +70,8 @@ export async function GET(req: Request) {
           .eq("clinic_id", clinicId)
           .eq("status", "scheduled")
           .eq("no_show_excused", false)
+          .is("cancelled_at", null)
+          .is("checked_in_at", null)
           .lt("starts_at", threshold);
         if (fetchError) {
           return NextResponse.json(
@@ -71,7 +79,7 @@ export async function GET(req: Request) {
             { status: 500 }
           );
         }
-        const ids = candidates!.map((r: any) => r.id);
+        const ids = (candidates ?? []).map((r: any) => r.id);
         const { error: updateError } = await supabase
           .from("appointments")
           .update({ status: "no_show", no_show_fee_charged: false })
@@ -84,13 +92,29 @@ export async function GET(req: Request) {
         }
         totalUpdatedCount += ids.length;
         updatedIds.push(...ids);
+
+        // Insert cron run log
+        await supabase.from("cron_runs").insert({
+          clinic_id: clinicId,
+          candidate_count: candidateCount ?? 0,
+          updated_count: ids.length,
+        });
       }
     }
-et totalUpdatedCount = 0;
-    let updatedIds: string[] = [];
 
-
-    return NextResponse.json({ step: "done", candidateCount: totalCandidateCount, updatedCount: totalUpdatedCount, updatedIds }, { status: 200 });
-} catch (error) {
-  return NextResponse.json({ step: "crash", error: (error as any).message }, { status: 500 });
+    return NextResponse.json(
+      {
+        step: "done",
+        candidateCount: totalCandidateCount,
+        updatedCount: totalUpdatedCount,
+        updatedIds,
+      },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    return NextResponse.json(
+      { step: "crash", error: error.message ?? String(error) },
+      { status: 500 }
+    );
+  }
 }
