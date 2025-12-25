@@ -131,15 +131,16 @@ if (logError) {
 }
 
 
-return NextResponse.json(
-  {
-    step: "done",
-    now: now.toISOString(),
-    candidateCount: totalCandidateCount,
-    updatedCount: totalUpdatedCount,
-    updatedIds,
-    logError: logError?.message ?? null,
-  },
-  { status: 200 }
-);
+  return NextResponse.json(
+    {
+      step: "done",
+      now: now.toISOString(),
+      candidateCount: totalCandidateCount,
+      updatedCount: totalUpdatedCount,
+      updatedIds,
+      logError: logError?.message ?? null,
+    },
+    { status: 200 }
+  );
 }
+
