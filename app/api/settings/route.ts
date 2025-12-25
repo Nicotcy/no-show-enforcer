@@ -4,15 +4,12 @@ import { getClinicIdForUser } from "@/lib/getClinicId";
 
 export const runtime = "nodejs";
 
-// Cliente ADMIN (service role) para leer/escribir clinic_settings sin pelearte con RLS.
-// Ojo: SOLO en servidor (route handler). Nunca en el frontend.
 const admin = createClient(
   process.env.SUPABASE_URL as string,
   process.env.SUPABASE_SERVICE_ROLE_KEY as string,
   { auth: { persistSession: false } }
 );
 
-// Defaults por si no existe fila en clinic_settings
 const DEFAULT_SETTINGS = {
   grace_minutes: 15,
   late_cancel_window_minutes: 1440,
@@ -22,15 +19,11 @@ const DEFAULT_SETTINGS = {
 };
 
 async function resolveClinicId(req: Request) {
-  // 1) si viene por query, lo aceptamos (útil para debug / admin)
   const url = new URL(req.url);
   const clinicIdFromQuery = url.searchParams.get("clinic_id");
   if (clinicIdFromQuery) return clinicIdFromQuery;
 
-  // 2) si no viene, lo sacamos del usuario logueado
-  // OJO: asumo que tu getClinicIdForUser ya mira la sesión/cookies.
-  // Si tu función necesita el req, cámbialo a: getClinicIdForUser(req)
-  const clinicId = await getClinicIdForUser();
+  const clinicId = await getClinicIdForUser(req);
   return clinicId;
 }
 
@@ -44,14 +37,13 @@ export async function GET(req: Request) {
     );
   }
 
-  // Intentamos leer settings
   const { data, error } = await admin
     .from("clinic_settings")
     .select("*")
     .eq("clinic_id", clinicId)
     .single();
 
-  // Si no existe fila, la creamos con defaults (esto te evita muchos dolores)
+  // si no existe fila -> crear defaults
   if (error && error.code === "PGRST116") {
     const { data: created, error: createErr } = await admin
       .from("clinic_settings")
