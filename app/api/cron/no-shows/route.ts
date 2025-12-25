@@ -110,24 +110,26 @@ export async function GET(req: Request) {
         totalUpdatedCount += ids.length;
         updatedIds.push(...ids);
       }
-
       const { error: logError } = await supabase.from("cron_runs").insert({
-        clinic_id: clinicId,
-        job: "no_shows",
-        candidate_count: cCount,
-        updated_count: clinicUpdatedCount,
-        details: {
-          thresholdIso,
-          graceMinutes,
-          updatedIds: clinicUpdatedIds,
-        },
-      });
+  clinic_id: clinicId,
+  job: "no_shows",
+  candidate_count: cCount,
+  updated_count: clinicUpdatedCount,
+  ran_at: new Date().toISOString(), // 🔴 ESTA LÍNEA ES LA CLAVE
+  details: {
+    thresholdIso,
+    graceMinutes,
+    updatedIds: clinicUpdatedIds,
+  },
+});
 
-      // No rompemos el cron por un fallo de logging, pero lo dejamos trazable en logs de Vercel
-      if (logError) {
-        console.error("cron_runs insert error", { clinicId, logError });
-      }
-    }
+if (logError) {
+  return NextResponse.json(
+    { step: "cron_run_insert_failed", error: logError.message },
+    { status: 500 }
+  );
+}
+
 
     return NextResponse.json(
       {
