@@ -11,21 +11,25 @@ const supabase = createClient(
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
+
   const secret = searchParams.get("secret");
   const authHeader = req.headers.get("authorization") || "";
   const expectedHeader = `Bearer ${process.env.CRON_SECRET}`;
 
   const secretMatch = secret && secret === process.env.CRON_SECRET;
   const headerMatch = authHeader === expectedHeader;
+
   if (!secretMatch && !headerMatch) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const now = new Date();
+
   try {
     const { data: settings, error: settingsError } = await supabase
       .from("clinic_settings")
       .select("clinic_id, grace_minutes");
+
     if (settingsError) {
       return NextResponse.json(
         { step: "settings-error", error: settingsError.message },
@@ -38,13 +42,13 @@ export async function GET(req: Request) {
     const updatedIds: string[] = [];
 
     for (const setting of settings ?? []) {
-      const graceMinutes = (setting as any).grace_minutes ?? 0;
-      const clinicId = (setting as any).clinic_id;
-      const threshold = new Date(
-        now.getTime() - graceMinutes * 60000
+      const clinicId = (setting as any).clinic_id as string;
+      const graceMinutes = ((setting as any).grace_minutes ?? 0) as number;
+
+      const thresholdIso = new Date(
+        now.getTime() - graceMinutes * 60_000
       ).toISOString();
 
-      // Count candidates for this clinic
       const { count: candidateCount, error: countError } = await supabase
         .from("appointments")
         .select("id", { count: "exact", head: true })
@@ -53,17 +57,22 @@ export async function GET(req: Request) {
         .eq("no_show_excused", false)
         .is("cancelled_at", null)
         .is("checked_in_at", null)
-        .lt("starts_at", threshold);
+        .lt("starts_at", thresholdIso);
+
       if (countError) {
         return NextResponse.json(
-          { step: "count-error", error: countError.message },
+          { step: "count-error", error: countError.message, clinicId },
           { status: 500 }
         );
       }
 
-      totalCandidateCount += candidateCount ?? 0;
+      const cCount = candidateCount ?? 0;
+      totalCandidateCount += cCount;
 
-      if ((candidateCount ?? 0) > 0) {
+      let clinicUpdatedCount = 0;
+      const clinicUpdatedIds: string[] = [];
+
+      if (cCount > 0) {
         const { data: candidates, error: fetchError } = await supabase
           .from("appointments")
           .select("id")
@@ -72,48 +81,67 @@ export async function GET(req: Request) {
           .eq("no_show_excused", false)
           .is("cancelled_at", null)
           .is("checked_in_at", null)
-          .lt("starts_at", threshold);
+          .lt("starts_at", thresholdIso);
+
         if (fetchError) {
           return NextResponse.json(
-            { step: "fetch-error", error: fetchError.message },
+            { step: "fetch-error", error: fetchError.message, clinicId },
             { status: 500 }
           );
         }
-        const ids = (candidates ?? []).map((r: any) => r.id);
+
+        const ids = (candidates ?? []).map((r: any) => r.id as string);
+
         const { error: updateError } = await supabase
           .from("appointments")
           .update({ status: "no_show", no_show_fee_charged: false })
           .in("id", ids);
+
         if (updateError) {
           return NextResponse.json(
-            { step: "update-error", error: updateError.message },
+            { step: "update-error", error: updateError.message, clinicId },
             { status: 500 }
           );
         }
+
+        clinicUpdatedCount = ids.length;
+        clinicUpdatedIds.push(...ids);
+
         totalUpdatedCount += ids.length;
         updatedIds.push(...ids);
+      }
 
-        // Insert cron run log
-        await supabase.from("cron_runs").insert({
-          clinic_id: clinicId,
-          candidate_count: candidateCount ?? 0,
-          updated_count: ids.length,
-        });
+      const { error: logError } = await supabase.from("cron_runs").insert({
+        clinic_id: clinicId,
+        job: "no_shows",
+        candidate_count: cCount,
+        updated_count: clinicUpdatedCount,
+        details: {
+          thresholdIso,
+          graceMinutes,
+          updatedIds: clinicUpdatedIds,
+        },
+      });
+
+      // No rompemos el cron por un fallo de logging, pero lo dejamos trazable en logs de Vercel
+      if (logError) {
+        console.error("cron_runs insert error", { clinicId, logError });
       }
     }
 
     return NextResponse.json(
       {
         step: "done",
+        now: now.toISOString(),
         candidateCount: totalCandidateCount,
         updatedCount: totalUpdatedCount,
         updatedIds,
       },
       { status: 200 }
     );
-  } catch (error: any) {
+  } catch (e: any) {
     return NextResponse.json(
-      { step: "crash", error: error.message ?? String(error) },
+      { step: "crash", error: e?.message ?? String(e) },
       { status: 500 }
     );
   }
