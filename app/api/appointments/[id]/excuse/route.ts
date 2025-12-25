@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
@@ -10,30 +11,32 @@ const supabase = createClient(
     auth: {
       persistSession: false,
     },
-  },
+  }
 );
 
 export async function POST(
-  req: Request,
-  { params }: { params: { id: string } },
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const url = new URL(req.url);
   const secret = url.searchParams.get("secret");
   const authHeader = req.headers.get("authorization") || "";
   const expectedHeader = `Bearer ${process.env.CRON_SECRET}`;
-  if ((!secret || secret !== process.env.CRON_SECRET) && authHeader !== expectedHeader) {
-    return NextResponse.json(
-      { error: "Unauthorized" },
-      { status: 401 },
-    );
+
+  if (
+    (!secret || secret !== process.env.CRON_SECRET) &&
+    authHeader !== expectedHeader
+  ) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const appointmentId = params.id;
+  const { id: appointmentId } = await params;
+
   let reason: string | null = null;
   try {
     const body = await req.json();
     reason = body?.reason ?? null;
-  } catch (_) {
+  } catch {
     reason = null;
   }
 
@@ -45,10 +48,7 @@ export async function POST(
     .single();
 
   if (error) {
-    return NextResponse.json(
-      { error: error.message },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
   return NextResponse.json(data, { status: 200 });
