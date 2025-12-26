@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
+
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
 export async function POST(req: Request) {
   try {
@@ -16,7 +18,7 @@ export async function POST(req: Request) {
           getAll() {
             return cookieStore.getAll();
           },
-          setAll(cookiesToSet) {
+          setAll(cookiesToSet: CookieToSet[]) {
             cookiesToSet.forEach(({ name, value, options }) => {
               cookieStore.set(name, value, options);
             });
@@ -53,7 +55,7 @@ export async function POST(req: Request) {
     // 4) Read profile (admin) - check if already onboarded
     const { data: profile, error: profileErr } = await supabaseAdmin
       .from("profiles")
-      .select("id, clinic_id, business_name, timezone, currency")
+      .select("id, clinic_id, currency")
       .eq("id", user.id)
       .single();
 
@@ -65,7 +67,6 @@ export async function POST(req: Request) {
     }
 
     if (profile?.clinic_id) {
-      // Idempotent: already onboarded
       return NextResponse.json(
         { ok: true, clinic_id: profile.clinic_id, already_onboarded: true },
         { status: 200 }
