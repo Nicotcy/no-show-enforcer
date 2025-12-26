@@ -1,39 +1,10 @@
-import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
-
-type CookieToSet = { name: string; value: string; options?: CookieOptions };
+import AppNav from "../../components/AppNav";
 
 export default async function SettingsPage() {
-  const cookieStore = await cookies();
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet: CookieToSet[]) {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            cookieStore.set(name, value, options);
-          });
-        },
-      },
-    }
+  return (
+    <div>
+      <AppNav />
+      <div style={{ padding: 24 }}>Settings</div>
+    </div>
   );
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("clinic_id")
-    .eq("id", user.id)
-    .single();
-
-  if (!profile?.clinic_id) redirect("/onboarding");
-
-  return <div style={{ padding: 24 }}>Settings OK</div>;
 }
