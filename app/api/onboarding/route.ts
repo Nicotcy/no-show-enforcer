@@ -52,47 +52,49 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing business_name" }, { status: 400 });
   }
 
-  // 3) upsert profile
-  const { error: profileErr } = await supabase.from("profiles").upsert({
-    id: user.id,
-    business_name: businessName,
-    timezone,
-    currency,
-  });
+// 3) create clinic (primero)
+const { data: clinic, error: clinicErr } = await supabase
+  .from("clinics")
+  .insert({
+    name: businessName,
+    owner_user_id: user.id,
+  })
+  .select("id")
+  .single();
 
-  if (profileErr) {
-    return NextResponse.json({ error: profileErr.message }, { status: 500 });
-  }
+if (clinicErr || !clinic?.id) {
+  return NextResponse.json(
+    { error: clinicErr?.message ?? "Failed creating clinic" },
+    { status: 500 }
+  );
+}
 
-  // 4) create clinic
-  const { data: clinic, error: clinicErr } = await supabase
-    .from("clinics")
-    .insert({
-      name: businessName,
-      owner_user_id: user.id,
-    })
-    .select("id")
-    .single();
+const clinicId = clinic.id;
 
-  if (clinicErr || !clinic?.id) {
-    return NextResponse.json(
-      { error: clinicErr?.message ?? "Failed creating clinic" },
-      { status: 500 }
-    );
-  }
+// 4) upsert profile (después, ya con clinic_id)
+const { error: profileErr } = await supabase.from("profiles").upsert({
+  id: user.id,
+  business_name: businessName,
+  timezone,
+  currency,
+  clinic_id: clinicId,
+});
 
-  const clinicId = clinic.id as string;
+if (profileErr) {
+  return NextResponse.json({ error: profileErr.message }, { status: 500 });
+}
 
-  // 5) membership (owner/admin)
-  const { error: memberErr } = await supabase.from("clinic_memberships").insert({
-    clinic_id: clinicId,
-    user_id: user.id,
-    role: "owner",
-  });
+// 5) membership (owner/admin)
+const { error: memberErr } = await supabase.from("clinic_memberships").insert({
+  clinic_id: clinicId,
+  user_id: user.id,
+  role: "owner",
+});
 
-  if (memberErr) {
-    return NextResponse.json({ error: memberErr.message }, { status: 500 });
-  }
+if (memberErr) {
+  return NextResponse.json({ error: memberErr.message }, { status: 500 });
+}
+
 
   // 6) default settings
   const { error: settingsErr } = await supabase.from("clinic_settings").insert({
