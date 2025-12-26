@@ -29,7 +29,7 @@ export async function GET(req: Request) {
 
     const now = new Date();
 
-    // 1) traemos clínicas
+    // 1) clinics
     const { data: clinics, error: clinicsError } = await supabase
       .from("clinics")
       .select("id");
@@ -46,45 +46,62 @@ export async function GET(req: Request) {
     const updatedIds: string[] = [];
     const perClinic: any[] = [];
 
-    // 2) procesamos cada clínica
+    // 2) per clinic
     for (const c of clinics ?? []) {
       const clinicId = c.id as string;
 
-      // settings (si falla, usamos defaults)
-      let graceMinutes = 0;
+      // ---- settings (robust, no .single()) ----
+      let graceMinutes = 10; // sensible default (matches onboarding)
       let settingsStatus: "ok" | "missing" | "error" = "ok";
       let settingsErrorMsg: string | null = null;
 
-      const { data: settings, error: settingsError } = await supabase
+      const { data: settingsRows, error: settingsError } = await supabase
         .from("clinic_settings")
         .select("grace_minutes")
         .eq("clinic_id", clinicId)
-        .single();
+        .limit(1);
 
       if (settingsError) {
-        // Si no existe fila de settings o hay error, seguimos con graceMinutes=0
         settingsStatus = "error";
         settingsErrorMsg = settingsError.message;
-      } else if (settings && typeof settings.grace_minutes === "number") {
-        graceMinutes = settings.grace_minutes;
+        // keep default graceMinutes = 10
+      } else if (settingsRows && settingsRows.length > 0) {
+        const row = settingsRows[0] as any;
+        if (typeof row?.grace_minutes === "number") {
+          graceMinutes = row.grace_minutes;
+          settingsStatus = "ok";
+        } else {
+          settingsStatus = "missing";
+        }
       } else {
         settingsStatus = "missing";
       }
 
+      // threshold = now - graceMinutes
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
       const thresholdIso = threshold.toISOString();
 
-      // 3) candidatos: citas pasadas + gracia, aún scheduled
+      // ---- candidates query (stronger rules) ----
+      // Rules:
+      // - same clinic
+      // - still scheduled
+      // - starts_at <= threshold
+      // - NOT checked in
+      // - NOT canceled (covers both canceled_at and cancelled_at)
+      // - NOT excused
       const { data: candidates, error: candError } = await supabase
         .from("appointments")
         .select("id")
         .eq("clinic_id", clinicId)
         .eq("status", "scheduled")
         .lte("starts_at", thresholdIso)
+        .is("checked_in_at", null)
+        .is("canceled_at", null)
+        .is("cancelled_at", null)
         .or("no_show_excused.is.null,no_show_excused.eq.false");
 
       if (candError) {
-        // registramos run aunque falle el query de candidatos
+        // log and continue
         await supabase.from("cron_runs").insert({
           clinic_id: clinicId,
           job: "no-shows",
@@ -117,6 +134,7 @@ export async function GET(req: Request) {
       let clinicUpdatedCount = 0;
       let clinicUpdatedIds: string[] = [];
 
+      // ---- update ----
       if (ids.length > 0) {
         const { data: updated, error: updError } = await supabase
           .from("appointments")
@@ -156,7 +174,7 @@ export async function GET(req: Request) {
         clinicUpdatedCount = clinicUpdatedIds.length;
       }
 
-      // 4) logging a cron_runs (si esto falla, no tiramos el cron)
+      // ---- logging ----
       const { error: logError } = await supabase.from("cron_runs").insert({
         clinic_id: clinicId,
         job: "no-shows",
@@ -173,7 +191,6 @@ export async function GET(req: Request) {
         },
       });
 
-      // acumulamos totales
       totalCandidateCount += candidateCount;
       totalUpdatedCount += clinicUpdatedCount;
       updatedIds.push(...clinicUpdatedIds);
