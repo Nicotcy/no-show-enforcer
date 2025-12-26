@@ -3,7 +3,7 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
 type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-export async function proxy(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const res = NextResponse.next();
 
   const supabase = createServerClient(
@@ -23,7 +23,7 @@ export async function proxy(req: NextRequest) {
     }
   );
 
-  // CLAVE: esto fuerza a Supabase a leer/refrescar sesión y escribir cookies si toca
+  // CLAVE: esto fuerza a Supabase a leer/validar sesión y setear cookies si hace falta
   await supabase.auth.getUser();
 
   return res;
