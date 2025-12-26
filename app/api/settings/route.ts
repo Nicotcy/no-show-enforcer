@@ -6,7 +6,7 @@ import { getClinicIdForUser } from "@/lib/getClinicId";
 
 export const runtime = "nodejs";
 
-// Service role para leer/escribir en DB sin depender de RLS
+// Service role para leer/escribir settings
 const admin = createClient(
   process.env.SUPABASE_URL as string,
   process.env.SUPABASE_SERVICE_ROLE_KEY as string,
@@ -21,12 +21,11 @@ const DEFAULT_SETTINGS = {
   currency: "EUR",
 };
 
-function getSupabaseServerClient() {
-  const cookieStore = cookies();
+async function getSupabaseServerClient() {
+  const cookieStore = await cookies();
 
   return createServerClient(
     process.env.SUPABASE_URL as string,
-    // suele ser NEXT_PUBLIC_SUPABASE_ANON_KEY (o SUPABASE_ANON_KEY si lo guardaste así)
     (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
       process.env.SUPABASE_ANON_KEY) as string,
     {
@@ -47,17 +46,15 @@ function getSupabaseServerClient() {
 async function resolveClinicId(req: Request) {
   const url = new URL(req.url);
 
-  // 1) si viene por query param, lo usamos (modo debug / admin)
+  // debug/admin
   const clinicIdFromQuery = url.searchParams.get("clinic_id");
   if (clinicIdFromQuery) return clinicIdFromQuery;
 
-  // 2) si no, lo sacamos del usuario logueado (cookies)
-  const supabase = getSupabaseServerClient();
+  // user logged in
+  const supabase = await getSupabaseServerClient();
   const { data, error } = await supabase.auth.getUser();
-
   if (error || !data?.user) return null;
 
-  // tu helper espera string (userId)
   const clinicId = await getClinicIdForUser(data.user.id);
   return clinicId ?? null;
 }
@@ -131,4 +128,3 @@ export async function PUT(req: Request) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json(data, { status: 200 });
 }
-
