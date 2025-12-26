@@ -23,7 +23,7 @@ export async function proxy(req: NextRequest) {
     }
   );
 
-  // CLAVE: fuerza lectura/refresh de sesión y sincroniza cookies
+  // Refresca sesión/cookies para SSR
   await supabase.auth.getUser();
 
   return res;
