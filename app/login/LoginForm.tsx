@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
 
-const supabase = createClient(
+const supabase = createBrowserClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
@@ -33,8 +33,9 @@ export default function LoginForm() {
       return;
     }
 
+    // Deja que el servidor decida (login page SSR redirige a onboarding/dashboard)
     router.refresh();
-    router.push("/dashboard");
+    router.push("/login");
   }
 
   return (
