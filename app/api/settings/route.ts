@@ -6,18 +6,8 @@ import { createClient } from "@supabase/supabase-js";
 type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
 type SessionCtx =
-  | {
-      user: null;
-      clinic_id: null;
-      currency: null;
-      supabaseAdmin: null;
-    }
-  | {
-      user: { id: string };
-      clinic_id: string | null;
-      currency: string;
-      supabaseAdmin: ReturnType<typeof createClient>;
-    };
+  | { user: null; clinic_id: null; currency: null; supabaseAdmin: null }
+  | { user: { id: string }; clinic_id: string | null; currency: string; supabaseAdmin: any };
 
 async function getCtx(): Promise<SessionCtx> {
   const cookieStore = await cookies();
@@ -70,11 +60,7 @@ async function getCtx(): Promise<SessionCtx> {
   };
 }
 
-async function ensureSettingsRow(
-  supabaseAdmin: ReturnType<typeof createClient>,
-  clinic_id: string,
-  currency: string
-) {
+async function ensureSettingsRow(supabaseAdmin: any, clinic_id: string, currency: string) {
   const { data: rows, error } = await supabaseAdmin
     .from("clinic_settings")
     .select("*")
