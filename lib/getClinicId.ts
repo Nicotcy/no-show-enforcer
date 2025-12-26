@@ -1,15 +1,20 @@
 import { supabaseServer } from "@/lib/supabase/server";
 
-export async function getClinicIdForUser() {
+export async function getClinicIdForUser(userId?: string) {
   const supabase = await supabaseServer();
 
-  const { data: userData, error: userErr } = await supabase.auth.getUser();
-  if (userErr || !userData?.user) return null;
+  // Si no te pasan userId, lo sacas de la sesión
+  let uid = userId;
+  if (!uid) {
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user) return null;
+    uid = data.user.id;
+  }
 
   const { data, error } = await supabase
     .from("clinic_users")
     .select("clinic_id")
-    .eq("user_id", userData.user.id)
+    .eq("user_id", uid)
     .limit(1)
     .single();
 
