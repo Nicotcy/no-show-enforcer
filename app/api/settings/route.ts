@@ -29,9 +29,7 @@ async function getCtx(): Promise<SessionCtx> {
     }
   );
 
-  const {
-    data: { user },
-  } = await supabaseAuth.auth.getUser();
+  const { data: { user } } = await supabaseAuth.auth.getUser();
 
   if (!user) {
     return { user: null, clinic_id: null, currency: null, supabaseAdmin: null };
@@ -48,9 +46,7 @@ async function getCtx(): Promise<SessionCtx> {
     .eq("id", user.id)
     .single();
 
-  if (profileErr) {
-    throw new Error(`Failed to read profile: ${profileErr.message}`);
-  }
+  if (profileErr) throw new Error(`Failed to read profile: ${profileErr.message}`);
 
   return {
     user: { id: user.id },
@@ -87,16 +83,18 @@ async function ensureSettingsRow(supabaseAdmin: any, clinic_id: string, currency
   return created;
 }
 
+function normalizeCurrency(input: string) {
+  // Minimal validation for now: only allow common ISO codes.
+  const v = String(input || "").trim().toUpperCase();
+  const allowed = ["EUR", "USD", "GBP"];
+  return allowed.includes(v) ? v : "EUR";
+}
+
 export async function GET() {
   try {
     const ctx = await getCtx();
-
-    if (!ctx.user) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-    }
-    if (!ctx.clinic_id) {
-      return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
-    }
+    if (!ctx.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    if (!ctx.clinic_id) return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
 
     const row = await ensureSettingsRow(ctx.supabaseAdmin, ctx.clinic_id, ctx.currency);
 
@@ -118,13 +116,8 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const ctx = await getCtx();
-
-    if (!ctx.user) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-    }
-    if (!ctx.clinic_id) {
-      return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
-    }
+    if (!ctx.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    if (!ctx.clinic_id) return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
 
     const body = await req.json().catch(() => ({} as any));
 
@@ -132,10 +125,12 @@ export async function POST(req: Request) {
     const late_cancel_window_minutes = Number(body?.late_cancel_window_minutes ?? 60);
     const no_show_fee_cents = Number(body?.no_show_fee_cents ?? 0);
     const auto_charge_enabled = Boolean(body?.auto_charge_enabled ?? false);
-    const currency = String(body?.currency ?? ctx.currency);
+    const currency = normalizeCurrency(body?.currency ?? ctx.currency);
 
-    const existing = await ensureSettingsRow(ctx.supabaseAdmin, ctx.clinic_id, ctx.currency);
+    // Ensure row exists
+    await ensureSettingsRow(ctx.supabaseAdmin, ctx.clinic_id, ctx.currency);
 
+    // IMPORTANT FIX: update by clinic_id (no id column)
     const { error: updErr } = await ctx.supabaseAdmin
       .from("clinic_settings")
       .update({
@@ -145,7 +140,7 @@ export async function POST(req: Request) {
         auto_charge_enabled,
         currency,
       })
-      .eq("id", existing.id);
+      .eq("clinic_id", ctx.clinic_id);
 
     if (updErr) throw new Error(`Failed to update clinic_settings: ${updErr.message}`);
 
