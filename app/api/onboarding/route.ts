@@ -7,7 +7,7 @@ type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
 export async function POST(req: Request) {
   try {
-    // 1) Read session user (anon key + cookies)
+    // 1) Read session user
     const cookieStore = await cookies();
 
     const supabaseAuth = createServerClient(
@@ -27,10 +27,7 @@ export async function POST(req: Request) {
       }
     );
 
-    const {
-      data: { user },
-    } = await supabaseAuth.auth.getUser();
-
+    const { data: { user } } = await supabaseAuth.auth.getUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
@@ -40,24 +37,20 @@ export async function POST(req: Request) {
     const business_name = String(body?.business_name ?? "").trim();
 
     if (!business_name) {
-      return NextResponse.json(
-        { error: "Missing business_name" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing business_name" }, { status: 400 });
     }
 
-    // 3) Service role client (bypass RLS)
+    // 3) Admin client (bypass RLS)
     const supabaseAdmin = createClient(
       process.env.SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    // 4) Read profile (admin) - check if already onboarded
-    const { data: profile, error: profileErr } = await supabaseAdmin
+    // 4) Get profile rows safely (NO .single())
+    const { data: profileRows, error: profileErr } = await supabaseAdmin
       .from("profiles")
-      .select("id, clinic_id, currency")
-      .eq("id", user.id)
-      .single();
+      .select("id, clinic_id, currency, business_name")
+      .eq("id", user.id);
 
     if (profileErr) {
       return NextResponse.json(
@@ -66,6 +59,32 @@ export async function POST(req: Request) {
       );
     }
 
+    let profile = profileRows?.[0] ?? null;
+
+    // If profile missing, create it (minimal)
+    if (!profile) {
+      const { data: createdProfile, error: createProfileErr } = await supabaseAdmin
+        .from("profiles")
+        .insert({
+          id: user.id,
+          business_name: null,
+          currency: "EUR",
+          clinic_id: null,
+        })
+        .select("id, clinic_id, currency, business_name")
+        .single();
+
+      if (createProfileErr) {
+        return NextResponse.json(
+          { error: `Failed to create profile: ${createProfileErr.message}` },
+          { status: 500 }
+        );
+      }
+
+      profile = createdProfile;
+    }
+
+    // If already onboarded, return OK
     if (profile?.clinic_id) {
       return NextResponse.json(
         { ok: true, clinic_id: profile.clinic_id, already_onboarded: true },
@@ -89,26 +108,40 @@ export async function POST(req: Request) {
 
     const clinic_id = clinicRow.id;
 
-    // 6) Create default clinic_settings
-    const { error: settingsErr } = await supabaseAdmin
+    // 6) Ensure clinic_settings exists (avoid duplicates crash)
+    const { data: settingsRows, error: settingsReadErr } = await supabaseAdmin
       .from("clinic_settings")
-      .insert({
-        clinic_id,
-        grace_minutes: 10,
-        late_cancel_window_minutes: 60,
-        auto_charge_enabled: false,
-        no_show_fee_cents: 0,
-        currency: profile?.currency ?? "EUR",
-      });
+      .select("id")
+      .eq("clinic_id", clinic_id);
 
-    if (settingsErr) {
+    if (settingsReadErr) {
       return NextResponse.json(
-        { error: `Failed to create clinic_settings: ${settingsErr.message}` },
+        { error: `Failed to read clinic_settings: ${settingsReadErr.message}` },
         { status: 500 }
       );
     }
 
-    // 7) Update profile -> attach clinic_id + business_name
+    if (!settingsRows || settingsRows.length === 0) {
+      const { error: settingsErr } = await supabaseAdmin
+        .from("clinic_settings")
+        .insert({
+          clinic_id,
+          grace_minutes: 10,
+          late_cancel_window_minutes: 60,
+          auto_charge_enabled: false,
+          no_show_fee_cents: 0,
+          currency: profile?.currency ?? "EUR",
+        });
+
+      if (settingsErr) {
+        return NextResponse.json(
+          { error: `Failed to create clinic_settings: ${settingsErr.message}` },
+          { status: 500 }
+        );
+      }
+    }
+
+    // 7) Attach clinic to profile (update by user.id)
     const { error: updErr } = await supabaseAdmin
       .from("profiles")
       .update({
