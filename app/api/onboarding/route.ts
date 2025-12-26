@@ -7,7 +7,6 @@ type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
 export async function POST(req: Request) {
   try {
-    // 1) Read session user
     const cookieStore = await cookies();
 
     const supabaseAuth = createServerClient(
@@ -32,7 +31,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    // 2) Parse body
     const body = await req.json().catch(() => ({} as any));
     const business_name = String(body?.business_name ?? "").trim();
 
@@ -40,13 +38,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing business_name" }, { status: 400 });
     }
 
-    // 3) Admin client (bypass RLS)
     const supabaseAdmin = createClient(
       process.env.SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    // 4) Get profile rows safely (NO .single())
+    // profiles: safe read (no .single())
     const { data: profileRows, error: profileErr } = await supabaseAdmin
       .from("profiles")
       .select("id, clinic_id, currency, business_name")
@@ -61,7 +58,6 @@ export async function POST(req: Request) {
 
     let profile = profileRows?.[0] ?? null;
 
-    // If profile missing, create it (minimal)
     if (!profile) {
       const { data: createdProfile, error: createProfileErr } = await supabaseAdmin
         .from("profiles")
@@ -84,7 +80,6 @@ export async function POST(req: Request) {
       profile = createdProfile;
     }
 
-    // If already onboarded, return OK
     if (profile?.clinic_id) {
       return NextResponse.json(
         { ok: true, clinic_id: profile.clinic_id, already_onboarded: true },
@@ -92,7 +87,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 5) Create clinic
+    // Create clinic
     const { data: clinicRow, error: clinicErr } = await supabaseAdmin
       .from("clinics")
       .insert({ name: business_name })
@@ -108,10 +103,10 @@ export async function POST(req: Request) {
 
     const clinic_id = clinicRow.id;
 
-    // 6) Ensure clinic_settings exists (avoid duplicates crash)
+    // clinic_settings: safe existence check (NO id column)
     const { data: settingsRows, error: settingsReadErr } = await supabaseAdmin
       .from("clinic_settings")
-      .select("id")
+      .select("clinic_id")
       .eq("clinic_id", clinic_id);
 
     if (settingsReadErr) {
@@ -141,7 +136,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // 7) Attach clinic to profile (update by user.id)
+    // Attach clinic to profile
     const { error: updErr } = await supabaseAdmin
       .from("profiles")
       .update({
