@@ -1,79 +1,39 @@
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
-"use client";
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+export default async function DashboardPage() {
+  const cookieStore = await cookies();
 
-type ClinicSettings = {
-  clinic_id: string;
-  grace_minutes: number;
-  late_cancel_window_minutes?: number;
-  auto_charge_enabled?: boolean;
-  no_show_fee_cents?: number;
-  currency?: string;
-};
-
-export default function DashboardRouterPage() {
-  const router = useRouter();
-  const [status, setStatus] = useState<string>("Cargando...");
-
-  useEffect(() => {
-    (async () => {
-      setStatus("Comprobando sesión...");
-
-      const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
-      if (sessionErr) {
-        setStatus("Error leyendo sesión");
-        return;
-      }
-
-      if (!sessionData.session) {
-        router.replace("/"); // login
-        return;
-      }
-
-      setStatus("Comprobando clínica...");
-
-      try {
-        // OJO: esto llama a TU API route (server) que resuelve clinic por cookies/sesión
-        const res = await fetch("/api/settings", { method: "GET" });
-
-        if (res.status === 401) {
-          router.replace("/"); // no autorizado
-          return;
-        }
-
-        if (res.status === 404) {
-          router.replace("/onboarding"); // no tiene clínica aún
-          return;
-        }
-
-        if (!res.ok) {
-          const txt = await res.text();
-          setStatus(`Error /api/settings: ${res.status} ${txt}`);
-          return;
-        }
-
-        const settings = (await res.json()) as ClinicSettings;
-
-        if (!settings?.clinic_id) {
-          router.replace("/onboarding");
-          return;
-        }
-
-        // Si tienes un dashboard real, manda ahí. Si no, a settings.
-        router.replace("/settings");
-      } catch (e: any) {
-        setStatus(e?.message ? `Error: ${e.message}` : "Error desconocido");
-      }
-    })();
-  }, [router]);
-
-  return (
-    <div style={{ maxWidth: 520, margin: "40px auto", padding: 16 }}>
-      <h1>Dashboard</h1>
-      <p>{status}</p>
-    </div>
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet: CookieToSet[]) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    }
   );
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("clinic_id")
+    .eq("id", user.id)
+    .single();
+
+  if (!profile?.clinic_id) redirect("/onboarding");
+
+  return <div style={{ padding: 24 }}>Dashboard OK</div>;
 }
