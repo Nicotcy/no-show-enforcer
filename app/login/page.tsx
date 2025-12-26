@@ -25,11 +25,8 @@ export default async function LoginPage() {
     }
   );
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data: { user } } = await supabase.auth.getUser();
 
-  // Si ya hay sesión, decide server-side a dónde va:
   if (user) {
     const { data: profile } = await supabase
       .from("profiles")
