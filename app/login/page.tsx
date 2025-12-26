@@ -1,7 +1,9 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import LoginForm from "./LoginForm";
+
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
 export default async function LoginPage() {
   const cookieStore = await cookies();
@@ -14,7 +16,7 @@ export default async function LoginPage() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: CookieToSet[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);
           });
