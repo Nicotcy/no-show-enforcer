@@ -12,11 +12,11 @@ const supabase = createBrowserClient(
 export default function OnboardingClient() {
   const router = useRouter();
 
-  const [businessName, setBusinessName] = useState("");
+  const [clinicName, setClinicName] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  async function runOnboarding() {
+  async function createClinic() {
     setLoading(true);
     setMsg(null);
 
@@ -24,27 +24,27 @@ export default function OnboardingClient() {
       const res = await fetch("/api/onboarding", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ business_name: businessName.trim() }),
+        body: JSON.stringify({ business_name: clinicName.trim() }),
       });
 
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setMsg(data?.error ?? "Error ejecutando onboarding");
+        setMsg(data?.error ?? "Onboarding failed");
         setLoading(false);
         return;
       }
 
-      setMsg("Clínica creada. Entrando...");
+      setMsg("Clinic created. Redirecting...");
       router.refresh();
       router.push("/dashboard");
     } catch (e: any) {
-      setMsg(e?.message ?? "Error de red");
+      setMsg(e?.message ?? "Network error");
       setLoading(false);
     }
   }
 
-  async function logout() {
+  async function signOut() {
     setLoading(true);
     setMsg(null);
 
@@ -57,18 +57,18 @@ export default function OnboardingClient() {
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <label style={{ display: "grid", gap: 6 }}>
-        Nombre de la clínica
+        Clinic name
         <input
-          value={businessName}
-          onChange={(e) => setBusinessName(e.target.value)}
-          placeholder="Ej: Clínica Torcelly"
+          value={clinicName}
+          onChange={(e) => setClinicName(e.target.value)}
+          placeholder="e.g. Torcelly Clinic"
           style={{ padding: 10, border: "1px solid #ccc", borderRadius: 8 }}
         />
       </label>
 
       <button
-        onClick={runOnboarding}
-        disabled={loading || businessName.trim().length < 2}
+        onClick={createClinic}
+        disabled={loading || clinicName.trim().length < 2}
         style={{
           padding: 10,
           borderRadius: 8,
@@ -76,11 +76,11 @@ export default function OnboardingClient() {
           cursor: "pointer",
         }}
       >
-        {loading ? "Creando..." : "Crear mi clínica"}
+        {loading ? "Creating..." : "Create my clinic"}
       </button>
 
       <button
-        onClick={logout}
+        onClick={signOut}
         disabled={loading}
         style={{
           padding: 10,
@@ -89,7 +89,7 @@ export default function OnboardingClient() {
           cursor: "pointer",
         }}
       >
-        Cerrar sesión
+        Sign out
       </button>
 
       {msg && <p style={{ margin: 0 }}>{msg}</p>}
