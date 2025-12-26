@@ -25,7 +25,10 @@ export default async function OnboardingPage() {
     }
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
   if (!user) redirect("/login");
 
   const { data: profile } = await supabase
@@ -39,7 +42,7 @@ export default async function OnboardingPage() {
   return (
     <div style={{ padding: 24, maxWidth: 520 }}>
       <h1>Onboarding</h1>
-      <p>Tu usuario aún no tiene clínica asociada. Créala para continuar.</p>
+      <p>Your account doesn’t have a clinic yet. Create one to continue.</p>
       <OnboardingClient />
     </div>
   );
