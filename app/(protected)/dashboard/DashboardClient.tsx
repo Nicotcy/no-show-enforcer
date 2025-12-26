@@ -6,11 +6,20 @@ export default function DashboardClient() {
   const [appointments, setAppointments] = useState<any[]>([]);
   const [patientName, setPatientName] = useState("");
   const [startsAt, setStartsAt] = useState("");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   async function load() {
-    const res = await fetch("/api/appointments");
-    const data = await res.json();
-    setAppointments(Array.isArray(data) ? data : []);
+    setErrorMsg(null);
+    const res = await fetch("/api/appointments", { cache: "no-store" });
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      setAppointments([]);
+      setErrorMsg(json?.error ?? "Failed to load appointments");
+      return;
+    }
+
+    setAppointments(Array.isArray(json?.appointments) ? json.appointments : []);
   }
 
   useEffect(() => {
@@ -18,7 +27,9 @@ export default function DashboardClient() {
   }, []);
 
   async function createAppointment() {
-    await fetch("/api/appointments", {
+    setErrorMsg(null);
+
+    const res = await fetch("/api/appointments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -27,18 +38,34 @@ export default function DashboardClient() {
       }),
     });
 
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      setErrorMsg(json?.error ?? "Failed to create appointment");
+      return;
+    }
+
     setPatientName("");
     setStartsAt("");
-    load();
+    await load();
   }
 
   async function patch(id: string, payload: any) {
-    await fetch(`/api/appointments/${id}`, {
+    setErrorMsg(null);
+
+    const res = await fetch(`/api/appointments/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    load();
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setErrorMsg(json?.error ?? "Failed to update appointment");
+      return;
+    }
+
+    await load();
   }
 
   function fmt(dt: any) {
@@ -51,7 +78,13 @@ export default function DashboardClient() {
   }
 
   return (
-    <div style={{ display: "grid", gap: 24 }}>
+    <div style={{ display: "grid", gap: 16 }}>
+      {errorMsg ? (
+        <div style={{ padding: 12, border: "1px solid #444" }}>
+          Error: {errorMsg}
+        </div>
+      ) : null}
+
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <input
           placeholder="Patient name"
@@ -64,57 +97,58 @@ export default function DashboardClient() {
           onChange={(e) => setStartsAt(e.target.value)}
         />
         <button onClick={createAppointment}>Add</button>
+        <button onClick={load}>Refresh</button>
       </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Patient</th>
-            <th>Starts at</th>
-            <th>Status</th>
-            <th>Checked-in</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {appointments.map((a) => (
-            <tr key={a.id}>
-              <td>{a.patient_name}</td>
-              <td>{fmt(a.starts_at)}</td>
-              <td>{a.status}</td>
-              <td>{a.checked_in_at ? "Yes" : "No"}</td>
-              <td style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button onClick={() => patch(a.id, { checked_in: true })}>
-                  Check-in
-                </button>
-
-                <button onClick={() => patch(a.id, { status: "late" })}>
-                  Mark late
-                </button>
-
-                <button onClick={() => patch(a.id, { status: "no_show" })}>
-                  Mark no-show
-                </button>
-
-                <button onClick={() => patch(a.id, { cancel: true })}>
-                  Cancel
-                </button>
-
-                <button
-                  onClick={() =>
-                    patch(a.id, {
-                      no_show_excused: true,
-                      no_show_excuse_reason: "Manual excuse",
-                    })
-                  }
-                >
-                  Excuse
-                </button>
-              </td>
+      {appointments.length === 0 ? (
+        <div>No appointments yet.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Patient</th>
+              <th>Starts at</th>
+              <th>Status</th>
+              <th>Checked-in</th>
+              <th>Actions</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {appointments.map((a) => (
+              <tr key={a.id}>
+                <td>{a.patient_name}</td>
+                <td>{fmt(a.starts_at)}</td>
+                <td>{a.status}</td>
+                <td>{a.checked_in_at ? "Yes" : "No"}</td>
+                <td style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button onClick={() => patch(a.id, { checked_in: true })}>
+                    Check-in
+                  </button>
+                  <button onClick={() => patch(a.id, { status: "late" })}>
+                    Mark late
+                  </button>
+                  <button onClick={() => patch(a.id, { status: "no_show" })}>
+                    Mark no-show
+                  </button>
+                  <button onClick={() => patch(a.id, { cancel: true })}>
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() =>
+                      patch(a.id, {
+                        no_show_excused: true,
+                        no_show_excuse_reason: "Manual excuse",
+                      })
+                    }
+                  >
+                    Excuse
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
