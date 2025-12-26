@@ -25,7 +25,9 @@ export default async function LoginPage() {
     }
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
   if (user) {
     const { data: profile } = await supabase
@@ -40,7 +42,7 @@ export default async function LoginPage() {
 
   return (
     <div style={{ padding: 24, maxWidth: 420 }}>
-      <h1>Login</h1>
+      <h1>Sign in</h1>
       <LoginForm />
     </div>
   );
