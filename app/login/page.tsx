@@ -1,98 +1,48 @@
-"use client";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { createServerClient } from "@supabase/ssr";
+import LoginForm from "./LoginForm";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+export default async function LoginPage() {
+  const cookieStore = await cookies();
 
-export default function LoginPage() {
-  const router = useRouter();
-
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
-
-  // 🔑 REDIRECCIÓN AUTOMÁTICA SI YA HAY SESIÓN
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      if (data.session) {
-        router.replace("/dashboard");
-      }
-    })();
-  }, [router]);
-
-  async function signUp() {
-    setMessage(null);
-    const { error } = await supabase.auth.signUp({ email, password });
-    setMessage(
-      error
-        ? error.message
-        : "Account created. Check your email if confirmation is required."
-    );
-  }
-
-  async function signIn() {
-    setMessage(null);
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      setMessage(error.message);
-      return;
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
     }
+  );
 
-    // perfil inicial (como ya tenías)
-    const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-    if (user) {
-      await supabase.from("profiles").upsert({
-        id: user.id,
-        business_name: null,
-        timezone: "Europe/Madrid",
-        currency: "EUR",
-        no_show_fee: 0,
-        late_cancel_fee: 0,
-        late_cancel_window_hours: 24,
-      });
-    }
+  // Si ya hay sesión, decide server-side a dónde va:
+  if (user) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("clinic_id")
+      .eq("id", user.id)
+      .single();
 
-    router.push("/dashboard");
-  }
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    setMessage("Signed out.");
+    if (profile?.clinic_id) redirect("/dashboard");
+    redirect("/onboarding");
   }
 
   return (
-    <div style={{ maxWidth: 420, margin: "40px auto", padding: 16 }}>
+    <div style={{ padding: 24, maxWidth: 420 }}>
       <h1>Login</h1>
-
-      <input
-        placeholder="Email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        style={{ width: "100%", marginTop: 12, padding: 10 }}
-      />
-
-      <input
-        type="password"
-        placeholder="Password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        style={{ width: "100%", marginTop: 12, padding: 10 }}
-      />
-
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button onClick={signUp}>Create account</button>
-        <button onClick={signIn}>Sign in</button>
-        <button onClick={signOut}>Sign out</button>
-      </div>
-
-      {message && <p style={{ marginTop: 12 }}>{message}</p>}
+      <LoginForm />
     </div>
   );
 }
