@@ -68,4 +68,31 @@ export default function OnboardingClient() {
 
       <button
         onClick={runOnboarding}
-        disabled={loading || businessName.trim().l
+        disabled={loading || businessName.trim().length < 2}
+        style={{
+          padding: 10,
+          borderRadius: 8,
+          border: "1px solid #ccc",
+          cursor: "pointer",
+        }}
+      >
+        {loading ? "Creando..." : "Crear mi clínica"}
+      </button>
+
+      <button
+        onClick={logout}
+        disabled={loading}
+        style={{
+          padding: 10,
+          borderRadius: 8,
+          border: "1px solid #ccc",
+          cursor: "pointer",
+        }}
+      >
+        Cerrar sesión
+      </button>
+
+      {msg && <p style={{ margin: 0 }}>{msg}</p>}
+    </div>
+  );
+}
