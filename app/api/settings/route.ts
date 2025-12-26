@@ -2,29 +2,22 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
+export const runtime = "nodejs";
+
 type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-function getEnv(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
-}
-
-async function getSupabaseServerClient() {
-  const cookieStore = await cookies();
+function makeSupabaseServerClient(cookieStore: Awaited<ReturnType<typeof cookies>>) {
   const cookiesToSet: CookieToSet[] = [];
 
   const supabase = createServerClient(
-    getEnv("NEXT_PUBLIC_SUPABASE_URL"),
-    getEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
+    process.env.NEXT_PUBLIC_SUPABASE_URL as string,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string,
     {
       cookies: {
         getAll() {
           return cookieStore.getAll();
         },
         setAll(c: CookieToSet[]) {
-          // En route handlers no podemos mutar el cookieStore directamente:
-          // acumulamos y los seteamos en la respuesta final.
           cookiesToSet.push(...c);
         },
       },
@@ -34,44 +27,39 @@ async function getSupabaseServerClient() {
   return { supabase, cookiesToSet };
 }
 
-async function withCookies<T>(
-  result: { body: T; status: number },
-  cookiesToSet: CookieToSet[]
-) {
-  const res = NextResponse.json(result.body, { status: result.status });
-  for (const { name, value, options } of cookiesToSet) {
-    res.cookies.set(name, value, options);
-  }
-  return res;
-}
+async function getClinicIdFromSession(supabase: any): Promise<string | null> {
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
 
-async function resolveClinicIdForAuthedUser(supabase: any) {
-  const { data: authData, error: authErr } = await supabase.auth.getUser();
-  if (authErr || !authData?.user) return { userId: null, clinicId: null };
+  if (error || !user) return null;
 
-  const userId = authData.user.id;
-
-  // Asumimos que onboarding guarda clinic_id en profiles
   const { data: profile, error: profErr } = await supabase
     .from("profiles")
     .select("clinic_id")
-    .eq("id", userId)
-    .maybeSingle();
+    .eq("id", user.id)
+    .single();
 
-  if (profErr || !profile?.clinic_id) return { userId, clinicId: null };
-
-  return { userId, clinicId: profile.clinic_id as string };
+  if (profErr) return null;
+  return profile?.clinic_id ?? null;
 }
 
 export async function GET() {
-  const { supabase, cookiesToSet } = await getSupabaseServerClient();
+  const cookieStore = await cookies();
+  const { supabase, cookiesToSet } = makeSupabaseServerClient(cookieStore);
 
-  const { clinicId } = await resolveClinicIdForAuthedUser(supabase);
+  const clinicId = await getClinicIdFromSession(supabase);
+
   if (!clinicId) {
-    return withCookies(
-      { body: { error: "Unauthorized or clinic not found for user" }, status: 401 },
-      cookiesToSet
+    const res = NextResponse.json(
+      { error: "Unauthorized or clinic not found for user" },
+      { status: 401 }
     );
+    for (const { name, value, options } of cookiesToSet) {
+      res.cookies.set(name, value, options);
+    }
+    return res;
   }
 
   const { data, error } = await supabase
@@ -81,37 +69,48 @@ export async function GET() {
     .single();
 
   if (error) {
-    return withCookies(
-      { body: { error: error.message }, status: 500 },
-      cookiesToSet
-    );
+    const res = NextResponse.json({ error: error.message }, { status: 500 });
+    for (const { name, value, options } of cookiesToSet) {
+      res.cookies.set(name, value, options);
+    }
+    return res;
   }
 
-  return withCookies({ body: data, status: 200 }, cookiesToSet);
+  const res = NextResponse.json(data, { status: 200 });
+  for (const { name, value, options } of cookiesToSet) {
+    res.cookies.set(name, value, options);
+  }
+  return res;
 }
 
-// usa PATCH (tu settings/page.tsx lo usa)
 export async function PATCH(req: Request) {
-  const { supabase, cookiesToSet } = await getSupabaseServerClient();
+  const cookieStore = await cookies();
+  const { supabase, cookiesToSet } = makeSupabaseServerClient(cookieStore);
 
-  const { clinicId } = await resolveClinicIdForAuthedUser(supabase);
+  const clinicId = await getClinicIdFromSession(supabase);
+
   if (!clinicId) {
-    return withCookies(
-      { body: { error: "Unauthorized or clinic not found for user" }, status: 401 },
-      cookiesToSet
+    const res = NextResponse.json(
+      { error: "Unauthorized or clinic not found for user" },
+      { status: 401 }
     );
+    for (const { name, value, options } of cookiesToSet) {
+      res.cookies.set(name, value, options);
+    }
+    return res;
   }
 
-  const body = await req.json();
+  const body = await req.json().catch(() => ({} as any));
 
   const updateData: Record<string, any> = {};
-  if (body.grace_minutes !== undefined) updateData.grace_minutes = body.grace_minutes;
+  if (body.grace_minutes !== undefined) updateData.grace_minutes = Number(body.grace_minutes);
   if (body.late_cancel_window_minutes !== undefined)
-    updateData.late_cancel_window_minutes = body.late_cancel_window_minutes;
+    updateData.late_cancel_window_minutes = Number(body.late_cancel_window_minutes);
   if (body.auto_charge_enabled !== undefined)
-    updateData.auto_charge_enabled = body.auto_charge_enabled;
-  if (body.no_show_fee_cents !== undefined) updateData.no_show_fee_cents = body.no_show_fee_cents;
-  if (body.currency !== undefined) updateData.currency = body.currency;
+    updateData.auto_charge_enabled = Boolean(body.auto_charge_enabled);
+  if (body.no_show_fee_cents !== undefined)
+    updateData.no_show_fee_cents = Number(body.no_show_fee_cents);
+  if (body.currency !== undefined) updateData.currency = String(body.currency);
 
   updateData.updated_at = new Date().toISOString();
 
@@ -123,11 +122,16 @@ export async function PATCH(req: Request) {
     .single();
 
   if (error) {
-    return withCookies(
-      { body: { error: error.message }, status: 500 },
-      cookiesToSet
-    );
+    const res = NextResponse.json({ error: error.message }, { status: 500 });
+    for (const { name, value, options } of cookiesToSet) {
+      res.cookies.set(name, value, options);
+    }
+    return res;
   }
 
-  return withCookies({ body: data, status: 200 }, cookiesToSet);
+  const res = NextResponse.json(data, { status: 200 });
+  for (const { name, value, options } of cookiesToSet) {
+    res.cookies.set(name, value, options);
+  }
+  return res;
 }
