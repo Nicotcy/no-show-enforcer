@@ -30,6 +30,7 @@ export default function AppNav() {
     >
       <Link href="/dashboard">Dashboard</Link>
       <Link href="/settings">Settings</Link>
+
       <button
         onClick={signOut}
         style={{
