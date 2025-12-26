@@ -22,7 +22,7 @@ async function getSupabaseServerClient() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(c) {
+        setAll(c: CookieToSet[]) {
           // En route handlers no podemos mutar el cookieStore directamente:
           // acumulamos y los seteamos en la respuesta final.
           cookiesToSet.push(...c);
