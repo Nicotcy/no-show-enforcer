@@ -1,40 +1,79 @@
-import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabase/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { getClinicIdForUser } from "@/lib/getClinicId";
 
-export const runtime = "nodejs";
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-export async function GET() {
+function makeSupabase(req: NextRequest, res: NextResponse) {
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL as string,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string,
+    {
+      cookies: {
+        getAll() {
+          return req.cookies.getAll();
+        },
+        setAll(cookiesToSet: CookieToSet[]) {
+          for (const { name, value, options } of cookiesToSet) {
+            res.cookies.set(name, value, options);
+          }
+        },
+      },
+    }
+  );
+}
+
+export async function GET(req: NextRequest) {
+  const res = NextResponse.next();
+  const supabase = makeSupabase(req, res);
+
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // IMPORTANTÍSIMO: tu función antes daba guerra por la firma.
+  // Según tus errores: getClinicIdForUser NO acepta argumentos.
+  // Así que la llamamos sin nada.
   const clinicId = await getClinicIdForUser();
   if (!clinicId) {
     return NextResponse.json(
-      { error: "Unauthorized or clinic not found for user" },
-      { status: 401 }
+      { error: "Clinic not found for user" },
+      { status: 404 }
     );
   }
 
-  const supabase = await supabaseServer();
-
-  const { data, error } = await supabase
+  const { data: settings, error: sErr } = await supabase
     .from("clinic_settings")
     .select("*")
     .eq("clinic_id", clinicId)
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data, { status: 200 });
+  if (sErr) return NextResponse.json({ error: sErr.message }, { status: 500 });
+
+  const out = NextResponse.json(settings, { status: 200 });
+  // copiamos cookies potencialmente refrescadas
+  for (const c of res.cookies.getAll()) out.cookies.set(c);
+  return out;
 }
 
-export async function PUT(req: Request) {
+export async function PUT(req: NextRequest) {
+  const res = NextResponse.next();
+  const supabase = makeSupabase(req, res);
+
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const clinicId = await getClinicIdForUser();
   if (!clinicId) {
     return NextResponse.json(
-      { error: "Unauthorized or clinic not found for user" },
-      { status: 401 }
+      { error: "Clinic not found for user" },
+      { status: 404 }
     );
   }
 
-  const supabase = await supabaseServer();
   const body = await req.json();
 
   const updateData: Record<string, any> = {};
@@ -45,13 +84,16 @@ export async function PUT(req: Request) {
   if (body.currency !== undefined) updateData.currency = body.currency;
   updateData.updated_at = new Date().toISOString();
 
-  const { data, error } = await supabase
+  const { data: updated, error: uErr } = await supabase
     .from("clinic_settings")
     .update(updateData)
     .eq("clinic_id", clinicId)
     .select()
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data, { status: 200 });
+  if (uErr) return NextResponse.json({ error: uErr.message }, { status: 500 });
+
+  const out = NextResponse.json(updated, { status: 200 });
+  for (const c of res.cookies.getAll()) out.cookies.set(c);
+  return out;
 }
