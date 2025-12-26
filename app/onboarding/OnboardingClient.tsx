@@ -2,9 +2,16 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { createBrowserClient } from "@supabase/ssr";
+
+const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export default function OnboardingClient() {
   const router = useRouter();
+  const [businessName, setBusinessName] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -13,7 +20,12 @@ export default function OnboardingClient() {
     setMsg(null);
 
     try {
-      const res = await fetch("/api/onboarding", { method: "POST" });
+      const res = await fetch("/api/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ business_name: businessName.trim() }),
+      });
+
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
@@ -31,22 +43,9 @@ export default function OnboardingClient() {
     }
   }
 
-  return (
-    <div style={{ display: "grid", gap: 12 }}>
-      <button
-        onClick={runOnboarding}
-        disabled={loading}
-        style={{
-          padding: 10,
-          borderRadius: 8,
-          border: "1px solid #ccc",
-          cursor: "pointer",
-        }}
-      >
-        {loading ? "Creando..." : "Crear mi clínica"}
-      </button>
-
-      {msg && <p style={{ margin: 0 }}>{msg}</p>}
-    </div>
-  );
-}
+  async function logout() {
+    setLoading(true);
+    setMsg(null);
+    await supabase.auth.signOut();
+    router.refresh();
+    router.push("/login");
