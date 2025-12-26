@@ -1,88 +1,133 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { createServerClient } from "@supabase/ssr";
-import { createClient } from "@supabase/supabase-js";
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
-export const runtime = "nodejs";
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-const admin = createClient(
-  process.env.SUPABASE_URL as string,
-  process.env.SUPABASE_SERVICE_ROLE_KEY as string,
-  { auth: { persistSession: false } }
-);
+function getEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
+}
 
-function authClient(req: NextRequest) {
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL as string,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string,
+async function getSupabaseServerClient() {
+  const cookieStore = await cookies();
+  const cookiesToSet: CookieToSet[] = [];
+
+  const supabase = createServerClient(
+    getEnv("NEXT_PUBLIC_SUPABASE_URL"),
+    getEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
     {
       cookies: {
         getAll() {
-          return req.cookies.getAll();
+          return cookieStore.getAll();
         },
-        setAll() {
-          // aquí no necesitamos setear cookies
+        setAll(c) {
+          // En route handlers no podemos mutar el cookieStore directamente:
+          // acumulamos y los seteamos en la respuesta final.
+          cookiesToSet.push(...c);
         },
       },
     }
   );
+
+  return { supabase, cookiesToSet };
 }
 
-async function getClinicIdFromSession(req: NextRequest) {
-  const supabase = authClient(req);
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data?.user) return null;
+async function withCookies<T>(
+  result: { body: T; status: number },
+  cookiesToSet: CookieToSet[]
+) {
+  const res = NextResponse.json(result.body, { status: result.status });
+  for (const { name, value, options } of cookiesToSet) {
+    res.cookies.set(name, value, options);
+  }
+  return res;
+}
 
-  const userId = data.user.id;
+async function resolveClinicIdForAuthedUser(supabase: any) {
+  const { data: authData, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !authData?.user) return { userId: null, clinicId: null };
 
-  const { data: profile, error: profErr } = await admin
+  const userId = authData.user.id;
+
+  // Asumimos que onboarding guarda clinic_id en profiles
+  const { data: profile, error: profErr } = await supabase
     .from("profiles")
     .select("clinic_id")
     .eq("id", userId)
     .maybeSingle();
 
-  if (profErr) return null;
-  return profile?.clinic_id ?? null;
+  if (profErr || !profile?.clinic_id) return { userId, clinicId: null };
+
+  return { userId, clinicId: profile.clinic_id as string };
 }
 
-export async function GET(req: NextRequest) {
-  const clinicId = await getClinicIdFromSession(req);
+export async function GET() {
+  const { supabase, cookiesToSet } = await getSupabaseServerClient();
+
+  const { clinicId } = await resolveClinicIdForAuthedUser(supabase);
   if (!clinicId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return withCookies(
+      { body: { error: "Unauthorized or clinic not found for user" }, status: 401 },
+      cookiesToSet
+    );
   }
 
-  const { data, error } = await admin
+  const { data, error } = await supabase
     .from("clinic_settings")
     .select("*")
     .eq("clinic_id", clinicId)
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data, { status: 200 });
+  if (error) {
+    return withCookies(
+      { body: { error: error.message }, status: 500 },
+      cookiesToSet
+    );
+  }
+
+  return withCookies({ body: data, status: 200 }, cookiesToSet);
 }
 
-export async function PUT(req: NextRequest) {
-  const clinicId = await getClinicIdFromSession(req);
+// usa PATCH (tu settings/page.tsx lo usa)
+export async function PATCH(req: Request) {
+  const { supabase, cookiesToSet } = await getSupabaseServerClient();
+
+  const { clinicId } = await resolveClinicIdForAuthedUser(supabase);
   if (!clinicId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return withCookies(
+      { body: { error: "Unauthorized or clinic not found for user" }, status: 401 },
+      cookiesToSet
+    );
   }
 
   const body = await req.json();
 
-  const updateData: any = {};
+  const updateData: Record<string, any> = {};
   if (body.grace_minutes !== undefined) updateData.grace_minutes = body.grace_minutes;
-  if (body.late_cancel_window_minutes !== undefined) updateData.late_cancel_window_minutes = body.late_cancel_window_minutes;
-  if (body.auto_charge_enabled !== undefined) updateData.auto_charge_enabled = body.auto_charge_enabled;
+  if (body.late_cancel_window_minutes !== undefined)
+    updateData.late_cancel_window_minutes = body.late_cancel_window_minutes;
+  if (body.auto_charge_enabled !== undefined)
+    updateData.auto_charge_enabled = body.auto_charge_enabled;
   if (body.no_show_fee_cents !== undefined) updateData.no_show_fee_cents = body.no_show_fee_cents;
   if (body.currency !== undefined) updateData.currency = body.currency;
+
   updateData.updated_at = new Date().toISOString();
 
-  const { data, error } = await admin
+  const { data, error } = await supabase
     .from("clinic_settings")
     .update(updateData)
     .eq("clinic_id", clinicId)
     .select()
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data, { status: 200 });
+  if (error) {
+    return withCookies(
+      { body: { error: error.message }, status: 500 },
+      cookiesToSet
+    );
+  }
+
+  return withCookies({ body: data, status: 200 }, cookiesToSet);
 }
