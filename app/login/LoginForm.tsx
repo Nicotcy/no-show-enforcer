@@ -15,11 +15,13 @@ export default function LoginForm() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function signIn(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setErrorMsg(null);
+    setInfoMsg(null);
 
     const { error } = await supabase.auth.signInWithPassword({
       email,
@@ -33,13 +35,40 @@ export default function LoginForm() {
       return;
     }
 
-    // Let the server decide where to go (onboarding vs dashboard)
+    router.refresh();
+    router.push("/login");
+  }
+
+  async function signUp() {
+    setLoading(true);
+    setErrorMsg(null);
+    setInfoMsg(null);
+
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      // If email confirmations are enabled in Supabase, the user must confirm via email.
+    });
+
+    setLoading(false);
+
+    if (error) {
+      setErrorMsg(error.message);
+      return;
+    }
+
+    setInfoMsg(
+      "Account created. If email confirmation is enabled, please check your inbox."
+    );
+
+    // If Supabase logs them in immediately (depending on your settings),
+    // this will take them to onboarding/dashboard via server logic.
     router.refresh();
     router.push("/login");
   }
 
   return (
-    <form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }}>
+    <form onSubmit={signIn} style={{ display: "grid", gap: 12 }}>
       <label style={{ display: "grid", gap: 6 }}>
         Email
         <input
@@ -75,7 +104,22 @@ export default function LoginForm() {
         {loading ? "Signing in..." : "Sign in"}
       </button>
 
+      <button
+        type="button"
+        onClick={signUp}
+        disabled={loading}
+        style={{
+          padding: 10,
+          borderRadius: 8,
+          border: "1px solid #ccc",
+          cursor: "pointer",
+        }}
+      >
+        {loading ? "Creating..." : "Create account"}
+      </button>
+
       {errorMsg && <p style={{ color: "crimson", margin: 0 }}>{errorMsg}</p>}
+      {infoMsg && <p style={{ margin: 0 }}>{infoMsg}</p>}
     </form>
   );
 }
