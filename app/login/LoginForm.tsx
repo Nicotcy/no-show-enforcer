@@ -33,7 +33,7 @@ export default function LoginForm() {
       return;
     }
 
-    // Deja que el servidor decida (login page SSR redirige a onboarding/dashboard)
+    // Let the server decide where to go (onboarding vs dashboard)
     router.refresh();
     router.push("/login");
   }
@@ -72,7 +72,7 @@ export default function LoginForm() {
           cursor: "pointer",
         }}
       >
-        {loading ? "Entrando..." : "Entrar"}
+        {loading ? "Signing in..." : "Sign in"}
       </button>
 
       {errorMsg && <p style={{ color: "crimson", margin: 0 }}>{errorMsg}</p>}
