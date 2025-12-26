@@ -5,7 +5,21 @@ import { createClient } from "@supabase/supabase-js";
 
 type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-async function getClinicIdFromSession() {
+type SessionCtx =
+  | {
+      user: null;
+      clinic_id: null;
+      currency: null;
+      supabaseAdmin: null;
+    }
+  | {
+      user: { id: string };
+      clinic_id: string | null;
+      currency: string;
+      supabaseAdmin: ReturnType<typeof createClient>;
+    };
+
+async function getCtx(): Promise<SessionCtx> {
   const cookieStore = await cookies();
 
   const supabaseAuth = createServerClient(
@@ -25,8 +39,13 @@ async function getClinicIdFromSession() {
     }
   );
 
-  const { data: { user } } = await supabaseAuth.auth.getUser();
-  if (!user) return { user: null as any, clinic_id: null as string | null };
+  const {
+    data: { user },
+  } = await supabaseAuth.auth.getUser();
+
+  if (!user) {
+    return { user: null, clinic_id: null, currency: null, supabaseAdmin: null };
+  }
 
   const supabaseAdmin = createClient(
     process.env.SUPABASE_URL!,
@@ -43,11 +62,19 @@ async function getClinicIdFromSession() {
     throw new Error(`Failed to read profile: ${profileErr.message}`);
   }
 
-  return { user, clinic_id: profile?.clinic_id ?? null, currency: profile?.currency ?? "EUR", supabaseAdmin };
+  return {
+    user: { id: user.id },
+    clinic_id: profile?.clinic_id ?? null,
+    currency: profile?.currency ?? "EUR",
+    supabaseAdmin,
+  };
 }
 
-async function ensureSettingsRow(supabaseAdmin: any, clinic_id: string, currency: string) {
-  // Get ALL rows (no .single()) so we never crash
+async function ensureSettingsRow(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  clinic_id: string,
+  currency: string
+) {
   const { data: rows, error } = await supabaseAdmin
     .from("clinic_settings")
     .select("*")
@@ -55,12 +82,8 @@ async function ensureSettingsRow(supabaseAdmin: any, clinic_id: string, currency
 
   if (error) throw new Error(`Failed to read clinic_settings: ${error.message}`);
 
-  if (rows && rows.length > 0) {
-    // pick first row deterministically
-    return rows[0];
-  }
+  if (rows && rows.length > 0) return rows[0];
 
-  // Create defaults if missing
   const { data: created, error: createErr } = await supabaseAdmin
     .from("clinic_settings")
     .insert({
@@ -75,15 +98,19 @@ async function ensureSettingsRow(supabaseAdmin: any, clinic_id: string, currency
     .single();
 
   if (createErr) throw new Error(`Failed to create clinic_settings: ${createErr.message}`);
-
   return created;
 }
 
 export async function GET() {
   try {
-    const ctx = await getClinicIdFromSession();
-    if (!ctx.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-    if (!ctx.clinic_id) return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
+    const ctx = await getCtx();
+
+    if (!ctx.user) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
+    if (!ctx.clinic_id) {
+      return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
+    }
 
     const row = await ensureSettingsRow(ctx.supabaseAdmin, ctx.clinic_id, ctx.currency);
 
@@ -93,7 +120,7 @@ export async function GET() {
         late_cancel_window_minutes: row.late_cancel_window_minutes ?? 60,
         no_show_fee_cents: row.no_show_fee_cents ?? 0,
         auto_charge_enabled: !!row.auto_charge_enabled,
-        currency: row.currency ?? ctx.currency ?? "EUR",
+        currency: row.currency ?? ctx.currency,
       },
       { status: 200 }
     );
@@ -104,9 +131,14 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const ctx = await getClinicIdFromSession();
-    if (!ctx.user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-    if (!ctx.clinic_id) return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
+    const ctx = await getCtx();
+
+    if (!ctx.user) {
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+    }
+    if (!ctx.clinic_id) {
+      return NextResponse.json({ error: "Clinic not found for user" }, { status: 400 });
+    }
 
     const body = await req.json().catch(() => ({} as any));
 
@@ -114,12 +146,10 @@ export async function POST(req: Request) {
     const late_cancel_window_minutes = Number(body?.late_cancel_window_minutes ?? 60);
     const no_show_fee_cents = Number(body?.no_show_fee_cents ?? 0);
     const auto_charge_enabled = Boolean(body?.auto_charge_enabled ?? false);
-    const currency = String(body?.currency ?? ctx.currency ?? "EUR");
+    const currency = String(body?.currency ?? ctx.currency);
 
-    // ensure row exists
     const existing = await ensureSettingsRow(ctx.supabaseAdmin, ctx.clinic_id, ctx.currency);
 
-    // update ONLY the row we are using (avoid .single())
     const { error: updErr } = await ctx.supabaseAdmin
       .from("clinic_settings")
       .update({
