@@ -1,11 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServerClient } from "@supabase/ssr";
-import { createClient } from "@supabase/supabase-js";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
 export const runtime = "nodejs";
 
-function getAuthClient(req: NextRequest) {
-  // Lee la sesión del usuario (cookies) con anon key
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
+
+function supabaseServer(req: NextRequest) {
   const res = NextResponse.next();
 
   const supabase = createServerClient(
@@ -16,8 +16,7 @@ function getAuthClient(req: NextRequest) {
         getAll() {
           return req.cookies.getAll();
         },
-        setAll(cookiesToSet) {
-          // No necesitamos setear nada aquí para onboarding, pero lo dejamos correcto
+        setAll(cookiesToSet: CookieToSet[]) {
           for (const { name, value, options } of cookiesToSet) {
             res.cookies.set(name, value, options);
           }
@@ -29,93 +28,91 @@ function getAuthClient(req: NextRequest) {
   return { supabase, res };
 }
 
-const admin = createClient(
-  process.env.SUPABASE_URL as string,
-  process.env.SUPABASE_SERVICE_ROLE_KEY as string,
-  { auth: { persistSession: false } }
-);
-
 export async function POST(req: NextRequest) {
-  const { supabase } = getAuthClient(req);
+  const { supabase, res } = supabaseServer(req);
 
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data?.user) {
+  // 1) auth
+  const { data: userData, error: userErr } = await supabase.auth.getUser();
+  if (userErr || !userData?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const user = userData.user;
 
-  const userId = data.user.id;
+  // 2) body
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch (_) {}
 
-  // 1) ¿Ya tiene clinic_id en profiles?
-  const { data: profile, error: profErr } = await admin
-    .from("profiles")
-    .select("id, clinic_id")
-    .eq("id", userId)
-    .maybeSingle();
+  const businessName = (body?.business_name ?? "").toString().trim();
+  const timezone = (body?.timezone ?? "Europe/Madrid").toString();
+  const currency = (body?.currency ?? "EUR").toString();
 
-  if (profErr) {
-    return NextResponse.json({ error: profErr.message }, { status: 500 });
+  if (!businessName) {
+    return NextResponse.json({ error: "Missing business_name" }, { status: 400 });
   }
 
-  if (profile?.clinic_id) {
-    return NextResponse.json(
-      { ok: true, clinic_id: profile.clinic_id, created: false },
-      { status: 200 }
-    );
+  // 3) upsert profile
+  const { error: profileErr } = await supabase.from("profiles").upsert({
+    id: user.id,
+    business_name: businessName,
+    timezone,
+    currency,
+  });
+
+  if (profileErr) {
+    return NextResponse.json({ error: profileErr.message }, { status: 500 });
   }
 
-  // 2) Crea clinic
-  const { data: clinic, error: clinicErr } = await admin
+  // 4) create clinic
+  const { data: clinic, error: clinicErr } = await supabase
     .from("clinics")
-    .insert({ name: null })
+    .insert({
+      name: businessName,
+      owner_user_id: user.id,
+    })
     .select("id")
     .single();
 
-  if (clinicErr) {
-    return NextResponse.json({ error: clinicErr.message }, { status: 500 });
+  if (clinicErr || !clinic?.id) {
+    return NextResponse.json(
+      { error: clinicErr?.message ?? "Failed creating clinic" },
+      { status: 500 }
+    );
   }
 
-  const clinicId = clinic.id;
+  const clinicId = clinic.id as string;
 
-  // 3) Crea clinic_settings (si ya existiera por alguna razón, upsert)
-  const { error: settingsErr } = await admin
-    .from("clinic_settings")
-    .upsert(
-      {
-        clinic_id: clinicId,
-        grace_minutes: 10,
-        late_cancel_window_minutes: 1440,
-        auto_charge_enabled: false,
-        no_show_fee_cents: 0,
-        currency: "EUR",
-      },
-      { onConflict: "clinic_id" }
-    );
+  // 5) membership (owner/admin)
+  const { error: memberErr } = await supabase.from("clinic_memberships").insert({
+    clinic_id: clinicId,
+    user_id: user.id,
+    role: "owner",
+  });
+
+  if (memberErr) {
+    return NextResponse.json({ error: memberErr.message }, { status: 500 });
+  }
+
+  // 6) default settings
+  const { error: settingsErr } = await supabase.from("clinic_settings").insert({
+    clinic_id: clinicId,
+    grace_minutes: 10,
+    late_cancel_window_minutes: 24 * 60,
+    auto_charge_enabled: false,
+    no_show_fee_cents: 0,
+    currency,
+  });
 
   if (settingsErr) {
     return NextResponse.json({ error: settingsErr.message }, { status: 500 });
   }
 
-  // 4) Upsert profile con clinic_id
-  const { error: upsertErr } = await admin.from("profiles").upsert(
-    {
-      id: userId,
-      clinic_id: clinicId,
-      business_name: null,
-      timezone: "Europe/Madrid",
-      currency: "EUR",
-      no_show_fee: 0,
-      late_cancel_fee: 0,
-      late_cancel_window_hours: 24,
-    },
-    { onConflict: "id" }
-  );
-
-  if (upsertErr) {
-    return NextResponse.json({ error: upsertErr.message }, { status: 500 });
-  }
-
-  return NextResponse.json(
-    { ok: true, clinic_id: clinicId, created: true },
-    { status: 200 }
-  );
+  // devolvemos también el res por si supabase ha querido setear cookies
+  // (en este flujo normalmente no, pero queda correcto)
+  res.headers.set("content-type", "application/json");
+  return new NextResponse(JSON.stringify({ ok: true, clinic_id: clinicId }), {
+    status: 200,
+    headers: res.headers,
+  });
 }
