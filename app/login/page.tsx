@@ -1,15 +1,25 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 export default function LoginPage() {
+  const router = useRouter();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
-    const router = useRouter();
 
+  // 🔑 REDIRECCIÓN AUTOMÁTICA SI YA HAY SESIÓN
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (data.session) {
+        router.replace("/dashboard");
+      }
+    })();
+  }, [router]);
 
   async function signUp() {
     setMessage(null);
@@ -21,40 +31,36 @@ export default function LoginPage() {
     );
   }
 
-async function signIn() {
-  setMessage(null);
+  async function signIn() {
+    setMessage(null);
 
-  const { error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
 
-  if (error) {
-    setMessage(error.message);
-    return;
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+
+    // perfil inicial (como ya tenías)
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (user) {
+      await supabase.from("profiles").upsert({
+        id: user.id,
+        business_name: null,
+        timezone: "Europe/Madrid",
+        currency: "EUR",
+        no_show_fee: 0,
+        late_cancel_fee: 0,
+        late_cancel_window_hours: 24,
+      });
+    }
+
+    router.push("/dashboard");
   }
-const { data: { user }, error: userErr } = await supabase.auth.getUser();
-
-if (!userErr && user) {
-  const { error: upsertErr } = await supabase.from("profiles").upsert({
-    id: user.id,
-    business_name: null,
-    timezone: "Europe/Madrid",
-    currency: "EUR",
-    no_show_fee: 0,
-    late_cancel_fee: 0,
-    late_cancel_window_hours: 24,
-  });
-
-  if (upsertErr) {
-    setMessage(upsertErr.message);
-    return;
-  }
-}
-
-  router.push("/dashboard");
-}
-
 
   async function signOut() {
     await supabase.auth.signOut();
@@ -90,4 +96,3 @@ if (!userErr && user) {
     </div>
   );
 }
-
