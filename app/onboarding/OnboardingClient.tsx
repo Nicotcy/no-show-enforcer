@@ -11,6 +11,7 @@ const supabase = createBrowserClient(
 
 export default function OnboardingClient() {
   const router = useRouter();
+
   const [businessName, setBusinessName] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -46,6 +47,25 @@ export default function OnboardingClient() {
   async function logout() {
     setLoading(true);
     setMsg(null);
+
     await supabase.auth.signOut();
+
     router.refresh();
     router.push("/login");
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <label style={{ display: "grid", gap: 6 }}>
+        Nombre de la clínica
+        <input
+          value={businessName}
+          onChange={(e) => setBusinessName(e.target.value)}
+          placeholder="Ej: Clínica Torcelly"
+          style={{ padding: 10, border: "1px solid #ccc", borderRadius: 8 }}
+        />
+      </label>
+
+      <button
+        onClick={runOnboarding}
+        disabled={loading || businessName.trim().l
