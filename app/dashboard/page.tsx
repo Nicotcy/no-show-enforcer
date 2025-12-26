@@ -4,84 +4,75 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-export default function LoginPage() {
-  const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
+type ClinicSettings = {
+  clinic_id: string;
+  grace_minutes: number;
+  late_cancel_window_minutes?: number;
+  auto_charge_enabled?: boolean;
+  no_show_fee_cents?: number;
+  currency?: string;
+};
 
-  // 🔹 PASO 3: si ya hay sesión, fuera del login
+export default function DashboardRouterPage() {
+  const router = useRouter();
+  const [status, setStatus] = useState<string>("Cargando...");
+
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      if (data.session) {
-        router.replace("/dashboard");
+      setStatus("Comprobando sesión...");
+
+      const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+      if (sessionErr) {
+        setStatus("Error leyendo sesión");
+        return;
+      }
+
+      if (!sessionData.session) {
+        router.replace("/"); // login
+        return;
+      }
+
+      setStatus("Comprobando clínica...");
+
+      try {
+        // OJO: esto llama a TU API route (server) que resuelve clinic por cookies/sesión
+        const res = await fetch("/api/settings", { method: "GET" });
+
+        if (res.status === 401) {
+          router.replace("/"); // no autorizado
+          return;
+        }
+
+        if (res.status === 404) {
+          router.replace("/onboarding"); // no tiene clínica aún
+          return;
+        }
+
+        if (!res.ok) {
+          const txt = await res.text();
+          setStatus(`Error /api/settings: ${res.status} ${txt}`);
+          return;
+        }
+
+        const settings = (await res.json()) as ClinicSettings;
+
+        if (!settings?.clinic_id) {
+          router.replace("/onboarding");
+          return;
+        }
+
+        // Si tienes un dashboard real, manda ahí. Si no, a settings.
+        router.replace("/settings");
+      } catch (e: any) {
+        setStatus(e?.message ? `Error: ${e.message}` : "Error desconocido");
       }
     })();
   }, [router]);
 
-  async function signIn() {
-    setMessage(null);
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    router.push("/dashboard");
-  }
-
-  async function signUp() {
-    setMessage(null);
-
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-    });
-
-    if (error) {
-      setMessage(error.message);
-    } else {
-      setMessage("Cuenta creada. Revisa tu email si es necesario.");
-    }
-  }
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    setMessage("Sesión cerrada");
-  }
-
   return (
-    <div style={{ maxWidth: 420, margin: "40px auto", padding: 16 }}>
-      <h1>Login</h1>
-
-      <input
-        placeholder="Email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        style={{ width: "100%", marginTop: 12, padding: 10 }}
-      />
-
-      <input
-        type="password"
-        placeholder="Password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        style={{ width: "100%", marginTop: 12, padding: 10 }}
-      />
-
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button onClick={signUp}>Create account</button>
-        <button onClick={signIn}>Sign in</button>
-        <button onClick={signOut}>Sign out</button>
-      </div>
-
-      {message && <p style={{ marginTop: 12 }}>{message}</p>}
+    <div style={{ maxWidth: 520, margin: "40px auto", padding: 16 }}>
+      <h1>Dashboard</h1>
+      <p>{status}</p>
     </div>
   );
 }
