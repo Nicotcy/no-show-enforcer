@@ -262,7 +262,9 @@ export default function DashboardClient() {
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
                   <td style={{ padding: 10 }}>{a.patient_name}</td>
                   <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
-                  <td style={{ padding: 10 }}>{a.status}</td>
+                  <td style={{ padding: 10 }}>
+  {a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : a.status}
+</td>
                   <td style={{ padding: 10 }}>{checkedIn}</td>
                   <td style={{ padding: 10, whiteSpace: "nowrap" }}>
                     <button onClick={() => updateStatus(a.id, "checked_in")} style={{ marginRight: 8 }}>
