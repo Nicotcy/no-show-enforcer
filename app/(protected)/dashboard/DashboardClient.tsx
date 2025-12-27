@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type AllowedStatus = "scheduled" | "checked_in" | "late" | "no_show" | "canceled";
 
 type Appointment = {
   id: string;
   patient_name: string;
-  starts_at: string; // stored as string from API
+  starts_at: string;
   status: AllowedStatus | string;
   checked_in_at: string | null;
   no_show_excused: boolean | null;
@@ -24,13 +24,8 @@ function toLocalDisplay(isoOrTs: string) {
   }
 }
 
-// Convert datetime-local ("2025-12-27T20:30") to a plain timestamp string
-// suitable for Postgres timestamp without timezone.
-// Output: "YYYY-MM-DDTHH:mm:00"
 function datetimeLocalToDb(value: string) {
-  // value already comes like "YYYY-MM-DDTHH:mm"
   if (!value) return "";
-  // Add seconds
   return `${value}:00`;
 }
 
@@ -39,10 +34,12 @@ export default function DashboardClient() {
   const [loading, setLoading] = useState(false);
 
   const [patientName, setPatientName] = useState("");
-  const [startsAtLocal, setStartsAtLocal] = useState(""); // datetime-local
+  const [startsAtLocal, setStartsAtLocal] = useState("");
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+
+  const dateInputRef = useRef<HTMLInputElement | null>(null);
 
   async function loadAppointments() {
     setLoading(true);
@@ -58,9 +55,6 @@ export default function DashboardClient() {
         return;
       }
 
-      // Be flexible with the response shape:
-      // - { appointments: [...] }
-      // - [...] (array)
       const list: Appointment[] = Array.isArray(json)
         ? json
         : Array.isArray(json?.appointments)
@@ -85,7 +79,7 @@ export default function DashboardClient() {
     copy.sort((a, b) => {
       const ta = new Date(a.starts_at).getTime();
       const tb = new Date(b.starts_at).getTime();
-      return tb - ta; // newest first
+      return tb - ta;
     });
     return copy;
   }, [appointments]);
@@ -123,12 +117,10 @@ export default function DashboardClient() {
         return;
       }
 
-      // Support { appointment: {...} } or returning the row directly
       const created: Appointment | null =
         json?.appointment ?? (json?.id ? json : null);
 
       if (created) {
-        // Optimistic insert so you see it immediately
         setAppointments((prev) => [created, ...prev]);
       }
 
@@ -136,7 +128,6 @@ export default function DashboardClient() {
       setStartsAtLocal("");
       setInfo("Appointment created.");
 
-      // Also re-fetch to be 100% consistent with DB
       await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to create appointment");
@@ -191,6 +182,15 @@ export default function DashboardClient() {
     }
   }
 
+  function openDatePicker() {
+    const el = dateInputRef.current;
+    if (!el) return;
+    // Chromium supports showPicker(); fallback to focus.
+    const anyEl: any = el as any;
+    if (typeof anyEl.showPicker === "function") anyEl.showPicker();
+    else el.focus();
+  }
+
   return (
     <div style={{ padding: 24 }}>
       <h1 style={{ fontSize: 24, marginBottom: 16 }}>Appointments</h1>
@@ -216,7 +216,17 @@ export default function DashboardClient() {
           style={{ padding: 10, minWidth: 240 }}
         />
 
+        <button
+          type="button"
+          onClick={openDatePicker}
+          style={{ padding: "10px 12px", border: "1px solid #333" }}
+          title="Pick date"
+        >
+          📅 Pick date
+        </button>
+
         <input
+          ref={dateInputRef}
           type="datetime-local"
           value={startsAtLocal}
           onChange={(e) => setStartsAtLocal(e.target.value)}
@@ -267,9 +277,7 @@ export default function DashboardClient() {
                     <button onClick={() => updateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
                       Cancel
                     </button>
-                    <button onClick={() => excuseNoShow(a.id)}>
-                      Excuse
-                    </button>
+                    <button onClick={() => excuseNoShow(a.id)}>Excuse</button>
                   </td>
                 </tr>
               );
