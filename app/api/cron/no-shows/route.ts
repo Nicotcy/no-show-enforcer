@@ -78,8 +78,11 @@ export async function GET(req: Request) {
       }
 
       // threshold = now - graceMinutes
+    
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
-      const thresholdIso = threshold.toISOString();
+      // UTC "sin Z" para comparar con timestamp without time zone
+      const thresholdIso = threshold.toISOString().replace(".000Z", "").replace("Z", "");
+
 
       // ---- candidates query (stronger rules) ----
       // Rules:
