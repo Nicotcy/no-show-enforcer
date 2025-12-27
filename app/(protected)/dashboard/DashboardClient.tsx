@@ -2,60 +2,74 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+type AllowedStatus = "scheduled" | "checked_in" | "late" | "no_show" | "canceled";
+
 type Appointment = {
   id: string;
-  patient_name: string | null;
-  starts_at: string; // ISO
-  status: string | null;
+  patient_name: string;
+  starts_at: string; // stored as string from API
+  status: AllowedStatus | string;
   checked_in_at: string | null;
   no_show_excused: boolean | null;
+  no_show_fee_charged: boolean | null;
 };
 
-type ApiError = { error: string };
-
-const ALLOWED_STATUSES = ["scheduled", "checked_in", "late", "no_show", "canceled"] as const;
-type AllowedStatus = (typeof ALLOWED_STATUSES)[number];
-
-function formatLocal(dtIso: string) {
+function toLocalDisplay(isoOrTs: string) {
   try {
-    const d = new Date(dtIso);
+    const d = new Date(isoOrTs);
+    if (Number.isNaN(d.getTime())) return isoOrTs;
     return d.toLocaleString();
   } catch {
-    return dtIso;
+    return isoOrTs;
   }
 }
 
-function normalizeStatus(s: string | null | undefined): AllowedStatus | "unknown" {
-  const v = String(s ?? "").trim().toLowerCase();
-  return (ALLOWED_STATUSES as readonly string[]).includes(v) ? (v as AllowedStatus) : "unknown";
+// Convert datetime-local ("2025-12-27T20:30") to a plain timestamp string
+// suitable for Postgres timestamp without timezone.
+// Output: "YYYY-MM-DDTHH:mm:00"
+function datetimeLocalToDb(value: string) {
+  // value already comes like "YYYY-MM-DDTHH:mm"
+  if (!value) return "";
+  // Add seconds
+  return `${value}:00`;
 }
 
 export default function DashboardClient() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Create form
   const [patientName, setPatientName] = useState("");
-  const [startsAtLocal, setStartsAtLocal] = useState(""); // datetime-local value
+  const [startsAtLocal, setStartsAtLocal] = useState(""); // datetime-local
 
-  async function fetchAppointments() {
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  async function loadAppointments() {
     setLoading(true);
-    setErrorMsg(null);
-
+    setError(null);
+    setInfo(null);
     try {
       const res = await fetch("/api/appointments", { cache: "no-store" });
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setErrorMsg((json as ApiError).error ?? "Failed to load appointments");
+        setError(json?.error || `Failed to load appointments (${res.status})`);
         setAppointments([]);
         return;
       }
 
-      setAppointments(Array.isArray(json) ? (json as Appointment[]) : []);
+      // Be flexible with the response shape:
+      // - { appointments: [...] }
+      // - [...] (array)
+      const list: Appointment[] = Array.isArray(json)
+        ? json
+        : Array.isArray(json?.appointments)
+        ? json.appointments
+        : [];
+
+      setAppointments(list);
     } catch (e: any) {
-      setErrorMsg(e?.message ?? "Failed to load appointments");
+      setError(e?.message || "Failed to load appointments");
       setAppointments([]);
     } finally {
       setLoading(false);
@@ -63,292 +77,214 @@ export default function DashboardClient() {
   }
 
   useEffect(() => {
-    fetchAppointments();
+    loadAppointments();
   }, []);
 
-  const sorted = useMemo(() => {
+  const sortedAppointments = useMemo(() => {
     const copy = [...appointments];
-    copy.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+    copy.sort((a, b) => {
+      const ta = new Date(a.starts_at).getTime();
+      const tb = new Date(b.starts_at).getTime();
+      return tb - ta; // newest first
+    });
     return copy;
   }, [appointments]);
 
   async function addAppointment() {
-    setErrorMsg(null);
+    setError(null);
+    setInfo(null);
 
-    const name = patientName.trim();
-    if (!name) {
-      setErrorMsg("Patient name is required.");
+    const trimmed = patientName.trim();
+    const startsAtDb = datetimeLocalToDb(startsAtLocal);
+
+    if (!trimmed) {
+      setError("Please enter a patient name.");
       return;
     }
-    if (!startsAtLocal) {
-      setErrorMsg("Start time is required.");
+    if (!startsAtDb) {
+      setError("Please pick a date/time.");
       return;
     }
-
-    // datetime-local => ISO
-    const startsIso = new Date(startsAtLocal).toISOString();
 
     try {
       const res = await fetch("/api/appointments", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patient_name: name, starts_at: startsIso }),
+        body: JSON.stringify({
+          patient_name: trimmed,
+          starts_at: startsAtDb,
+        }),
       });
 
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        setErrorMsg((json as ApiError).error ?? "Failed to create appointment");
+        setError(json?.error || `Failed to create appointment (${res.status})`);
         return;
+      }
+
+      // Support { appointment: {...} } or returning the row directly
+      const created: Appointment | null =
+        json?.appointment ?? (json?.id ? json : null);
+
+      if (created) {
+        // Optimistic insert so you see it immediately
+        setAppointments((prev) => [created, ...prev]);
       }
 
       setPatientName("");
       setStartsAtLocal("");
-      await fetchAppointments();
+      setInfo("Appointment created.");
+
+      // Also re-fetch to be 100% consistent with DB
+      await loadAppointments();
     } catch (e: any) {
-      setErrorMsg(e?.message ?? "Failed to create appointment");
+      setError(e?.message || "Failed to create appointment");
     }
   }
 
-  async function patchAppointment(id: string, payload: any) {
-    setErrorMsg(null);
-
+  async function updateStatus(id: string, status: AllowedStatus) {
+    setError(null);
+    setInfo(null);
     try {
       const res = await fetch(`/api/appointments/${id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ status }),
       });
 
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setErrorMsg((json as ApiError).error ?? "Update failed");
-        return false;
+        setError(json?.error || `Failed to update (${res.status})`);
+        return;
       }
 
-      await fetchAppointments();
-      return true;
+      setInfo("Updated.");
+      await loadAppointments();
     } catch (e: any) {
-      setErrorMsg(e?.message ?? "Update failed");
-      return false;
+      setError(e?.message || "Failed to update");
     }
   }
 
-  // Actions that match backend expectations EXACTLY
-  function actionCheckIn(id: string) {
-    return patchAppointment(id, { action: "check_in" });
-  }
-  function actionExcuse(id: string) {
-    const reason = window.prompt("Reason (optional):") ?? "";
-    return patchAppointment(id, { action: "excuse", reason: reason.trim() || null });
-  }
-  function actionSetStatus(id: string, status: AllowedStatus) {
-    return patchAppointment(id, { status });
+  async function excuseNoShow(id: string) {
+    setError(null);
+    setInfo(null);
+    try {
+      const reason = prompt("Reason (optional):") || null;
+
+      const res = await fetch(`/api/appointments/${id}/excuse`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(json?.error || `Failed to excuse (${res.status})`);
+        return;
+      }
+
+      setInfo("No-show excused.");
+      await loadAppointments();
+    } catch (e: any) {
+      setError(e?.message || "Failed to excuse");
+    }
   }
 
   return (
-    <div style={{ padding: 24, maxWidth: 1200 }}>
-      <h2 style={{ fontSize: 22, marginBottom: 12 }}>Appointments</h2>
+    <div style={{ padding: 24 }}>
+      <h1 style={{ fontSize: 24, marginBottom: 16 }}>Appointments</h1>
 
-      {errorMsg && (
+      {(error || info) && (
         <div
           style={{
-            border: "1px solid rgba(255,255,255,0.25)",
+            border: "1px solid #333",
             padding: 12,
             marginBottom: 16,
-            borderRadius: 8,
-            background: "rgba(255,255,255,0.06)",
+            background: error ? "rgba(255,0,0,0.08)" : "rgba(0,255,0,0.08)",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-            <div>Error: {errorMsg}</div>
-            <button
-              onClick={() => setErrorMsg(null)}
-              style={{
-                border: "1px solid rgba(255,255,255,0.25)",
-                background: "transparent",
-                color: "inherit",
-                padding: "6px 10px",
-                borderRadius: 8,
-                cursor: "pointer",
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
+          {error ? `Error: ${error}` : info}
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
         <input
           placeholder="Patient name"
           value={patientName}
           onChange={(e) => setPatientName(e.target.value)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.2)",
-            background: "rgba(0,0,0,0.2)",
-            color: "inherit",
-            minWidth: 220,
-          }}
+          style={{ padding: 10, minWidth: 240 }}
         />
 
         <input
           type="datetime-local"
           value={startsAtLocal}
           onChange={(e) => setStartsAtLocal(e.target.value)}
-          style={{
-            padding: 10,
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.2)",
-            background: "rgba(0,0,0,0.2)",
-            color: "inherit",
-            minWidth: 220,
-          }}
+          style={{ padding: 10 }}
         />
 
-        <button
-          onClick={addAppointment}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.25)",
-            background: "transparent",
-            color: "inherit",
-            cursor: "pointer",
-          }}
-        >
+        <button onClick={addAppointment} style={{ padding: "10px 14px" }}>
           Add
         </button>
 
-        <button
-          onClick={fetchAppointments}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.25)",
-            background: "transparent",
-            color: "inherit",
-            cursor: "pointer",
-          }}
-        >
+        <button onClick={loadAppointments} style={{ padding: "10px 14px" }}>
           Refresh
         </button>
 
         {loading && <span style={{ opacity: 0.7 }}>Loading…</span>}
       </div>
 
-      <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 14 }}>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "220px 240px 140px 140px 1fr",
-            gap: 12,
-            fontWeight: 600,
-            marginBottom: 10,
-            opacity: 0.95,
-          }}
-        >
-          <div>Patient</div>
-          <div>Starts at</div>
-          <div>Status</div>
-          <div>Checked-in</div>
-          <div>Actions</div>
-        </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
+              <th style={{ padding: 10 }}>Patient</th>
+              <th style={{ padding: 10 }}>Starts at</th>
+              <th style={{ padding: 10 }}>Status</th>
+              <th style={{ padding: 10 }}>Checked-in</th>
+              <th style={{ padding: 10 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedAppointments.map((a) => {
+              const checkedIn = a.checked_in_at ? "Yes" : "No";
+              return (
+                <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
+                  <td style={{ padding: 10 }}>{a.patient_name}</td>
+                  <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
+                  <td style={{ padding: 10 }}>{a.status}</td>
+                  <td style={{ padding: 10 }}>{checkedIn}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>
+                    <button onClick={() => updateStatus(a.id, "checked_in")} style={{ marginRight: 8 }}>
+                      Check-in
+                    </button>
+                    <button onClick={() => updateStatus(a.id, "late")} style={{ marginRight: 8 }}>
+                      Mark late
+                    </button>
+                    <button onClick={() => updateStatus(a.id, "no_show")} style={{ marginRight: 8 }}>
+                      Mark no-show
+                    </button>
+                    <button onClick={() => updateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
+                      Cancel
+                    </button>
+                    <button onClick={() => excuseNoShow(a.id)}>
+                      Excuse
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
 
-        {sorted.map((a) => {
-          const status = normalizeStatus(a.status);
-          const checkedIn = Boolean(a.checked_in_at);
-
-          // Disable buttons that should never be used in that state (less noise)
-          const isCanceled = status === "canceled";
-          const isNoShow = status === "no_show";
-
-          return (
-            <div
-              key={a.id}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "220px 240px 140px 140px 1fr",
-                gap: 12,
-                padding: "10px 0",
-                borderTop: "1px solid rgba(255,255,255,0.08)",
-                alignItems: "center",
-              }}
-            >
-              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {a.patient_name || "(no name)"}
-              </div>
-
-              <div>{formatLocal(a.starts_at)}</div>
-
-              <div style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-                {status}
-              </div>
-
-              <div>{checkedIn ? "Yes" : "No"}</div>
-
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button
-                  onClick={() => actionCheckIn(a.id)}
-                  disabled={isCanceled || isNoShow || checkedIn}
-                  style={btnStyle(isCanceled || isNoShow || checkedIn)}
-                >
-                  Check-in
-                </button>
-
-                <button
-                  onClick={() => actionSetStatus(a.id, "late")}
-                  disabled={isCanceled || isNoShow || checkedIn}
-                  style={btnStyle(isCanceled || isNoShow || checkedIn)}
-                >
-                  Mark late
-                </button>
-
-                <button
-                  onClick={() => actionSetStatus(a.id, "no_show")}
-                  disabled={isCanceled || isNoShow || checkedIn}
-                  style={btnStyle(isCanceled || isNoShow || checkedIn)}
-                >
-                  Mark no-show
-                </button>
-
-                <button
-                  onClick={() => actionSetStatus(a.id, "canceled")}
-                  disabled={isCanceled || isNoShow || checkedIn}
-                  style={btnStyle(isCanceled || isNoShow || checkedIn)}
-                >
-                  Cancel
-                </button>
-
-                <button
-                  onClick={() => actionExcuse(a.id)}
-                  disabled={!isNoShow}
-                  style={btnStyle(!isNoShow)}
-                >
-                  Excuse
-                </button>
-              </div>
-            </div>
-          );
-        })}
-
-        {sorted.length === 0 && !loading && (
-          <div style={{ opacity: 0.7, paddingTop: 12 }}>No appointments yet.</div>
-        )}
+            {sortedAppointments.length === 0 && !loading && (
+              <tr>
+                <td style={{ padding: 10, opacity: 0.7 }} colSpan={5}>
+                  No appointments yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
-}
-
-function btnStyle(disabled: boolean): React.CSSProperties {
-  return {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.25)",
-    background: "transparent",
-    color: "inherit",
-    cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.4 : 1,
-  };
 }
