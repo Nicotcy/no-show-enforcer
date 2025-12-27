@@ -48,15 +48,20 @@ async function getContext() {
   return { user, clinic_id: profile.clinic_id, supabaseAdmin } as const;
 }
 
+// Convert datetime-local (local time) -> UTC string without 'Z' (fits timestamp without tz)
 function normalizeStartsAt(input: any) {
-  // input from <input type="datetime-local"> usually: "2025-12-26T20:30"
   const s = String(input ?? "").trim();
   if (!s) return null;
 
   // Add seconds if missing
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return `${s}:00`;
+  const withSeconds =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s) ? `${s}:00` : s;
 
-  return s;
+  // Parse as LOCAL time (browser-style), then convert to UTC ISO, then strip Z/ms
+  const d = new Date(withSeconds);
+  if (isNaN(d.getTime())) return null;
+
+  return d.toISOString().replace(".000Z", "").replace("Z", "");
 }
 
 export async function GET() {
@@ -104,7 +109,7 @@ export async function POST(req: Request) {
       clinic_id: ctx.clinic_id,
       user_id: ctx.user.id,
       patient_name,
-      starts_at,
+      starts_at, // UTC (no Z)
       status: "scheduled",
       no_show_excused: false,
       no_show_fee_charged: false,
