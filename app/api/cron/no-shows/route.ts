@@ -97,6 +97,7 @@ export async function GET(req: Request) {
         .select("id")
         .eq("clinic_id", clinicId)
         .eq("status", "scheduled")
+        .is("checked_in_at", null)
         .lte("starts_at", thresholdIso)
         .is("checked_in_at", null)
         .is("canceled_at", null)
