@@ -35,7 +35,9 @@ async function getContext() {
     }
   );
 
-  const { data: { user } } = await supabaseAuth.auth.getUser();
+  const {
+    data: { user },
+  } = await supabaseAuth.auth.getUser();
   if (!user) return null;
 
   const supabaseAdmin = createClient(
@@ -55,17 +57,20 @@ async function getContext() {
   return { user, clinic_id: profile.clinic_id as string, supabaseAdmin } as const;
 }
 
-export async function PATCH(req: Request, { params }: { params: { id: string } }) {
+export async function PATCH(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
   const ctx = await getContext();
   if (!ctx || "error" in ctx) {
     const msg = ctx && "error" in ctx ? ctx.error : "Unauthorized";
     return NextResponse.json({ error: msg }, { status: 401 });
   }
 
-  const appointmentId = params.id;
+  const { id: appointmentId } = await params;
 
   const body = await req.json().catch(() => ({} as any));
-  const action = String(body.action ?? "").trim(); // optional: "set_status" | "excuse" | "check_in"
+  const action = String(body.action ?? "").trim(); // "excuse" | "check_in" | "" (default set_status)
 
   // Load current appointment (must belong to this clinic)
   const { data: appt, error: apptErr } = await ctx.supabaseAdmin
@@ -76,6 +81,7 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     .limit(1);
 
   if (apptErr) return NextResponse.json({ error: apptErr.message }, { status: 500 });
+
   const current = appt?.[0];
   if (!current) return NextResponse.json({ error: "Appointment not found" }, { status: 404 });
 
@@ -90,9 +96,8 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     );
   }
 
-  // Action handlers
+  // Excuse
   if (action === "excuse") {
-    // Excuse only makes sense for no_show
     if (currentStatus !== "no_show") {
       return NextResponse.json(
         { error: "Only no-show appointments can be excused." },
@@ -116,8 +121,8 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     return NextResponse.json({ ok: true }, { status: 200 });
   }
 
+  // Check-in
   if (action === "check_in") {
-    // Check-in sets checked_in_at and status checked_in
     const { error: updErr } = await ctx.supabaseAdmin
       .from("appointments")
       .update({
@@ -149,11 +154,7 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     );
   }
 
-  // Minimal transitions (simple + safe):
-  // - scheduled -> late / checked_in / canceled / no_show
-  // - late -> checked_in / canceled / no_show
-  // - no_show -> (can still be excused via action=excuse; status stays no_show)
-  // - checked_in -> (allow cancel? no. keep it stable)
+  // Status immutability rules
   if (currentStatus === "checked_in" && nextStatus !== "checked_in") {
     return NextResponse.json(
       { error: "Checked-in appointments cannot change status." },
