@@ -21,6 +21,12 @@ function isAuthorized(req: Request) {
   );
 }
 
+function clampInt(n: unknown, min: number, max: number, fallback: number) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(x)));
+}
+
 export async function GET(req: Request) {
   try {
     if (!isAuthorized(req)) {
@@ -46,52 +52,37 @@ export async function GET(req: Request) {
     const updatedIds: string[] = [];
     const perClinic: any[] = [];
 
-    // 2) per clinic
     for (const c of clinics ?? []) {
       const clinicId = c.id as string;
 
-      // ---- settings (robust, no .single()) ----
-      let graceMinutes = 10; // sensible default (matches onboarding)
+      // ---- settings (robust) ----
+      let graceMinutes = 10;
       let settingsStatus: "ok" | "missing" | "error" = "ok";
       let settingsErrorMsg: string | null = null;
 
-      const { data: settingsRows, error: settingsError } = await supabase
+      const { data: settingsRow, error: settingsError } = await supabase
         .from("clinic_settings")
         .select("grace_minutes")
         .eq("clinic_id", clinicId)
-        .limit(1);
+        .maybeSingle();
 
       if (settingsError) {
         settingsStatus = "error";
         settingsErrorMsg = settingsError.message;
-        // keep default graceMinutes = 10
-      } else if (settingsRows && settingsRows.length > 0) {
-        const row = settingsRows[0] as any;
-        if (typeof row?.grace_minutes === "number") {
-          graceMinutes = row.grace_minutes;
-          settingsStatus = "ok";
-        } else {
-          settingsStatus = "missing";
-        }
+      } else if (settingsRow && typeof (settingsRow as any)?.grace_minutes !== "undefined") {
+        graceMinutes = clampInt((settingsRow as any).grace_minutes, 0, 240, 10);
       } else {
         settingsStatus = "missing";
       }
 
       // threshold = now - graceMinutes
-    
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
-      // UTC "sin Z" para comparar con timestamp without time zone
-      const thresholdIso = threshold.toISOString().replace(".000Z", "").replace("Z", "");
 
+      // Use full ISO (with Z). This is safest for timestamptz columns.
+      const thresholdIso = threshold.toISOString();
 
-      // ---- candidates query (stronger rules) ----
-      // Rules:
-      // - same clinic
-      // - still scheduled
-      // - starts_at <= threshold
-      // - NOT checked in
-      // - NOT canceled (covers both canceled_at and cancelled_at)
-      // - NOT excused
+      // ---- candidates query (ONLY count + ids for response) ----
+      // We keep this select for observability, but LIMIT it so we don't return huge arrays.
       const { data: candidates, error: candError } = await supabase
         .from("appointments")
         .select("id")
@@ -99,13 +90,12 @@ export async function GET(req: Request) {
         .eq("status", "scheduled")
         .is("checked_in_at", null)
         .lte("starts_at", thresholdIso)
-        .is("checked_in_at", null)
-        .is("canceled_at", null)
         .is("cancelled_at", null)
-        .or("no_show_excused.is.null,no_show_excused.eq.false");
+        .is("canceled_at", null)
+        .or("no_show_excused.is.null,no_show_excused.eq.false")
+        .limit(500); // avoid huge payloads in case someone imported tons of appointments
 
       if (candError) {
-        // log and continue
         await supabase.from("cron_runs").insert({
           clinic_id: clinicId,
           job: "no-shows",
@@ -132,51 +122,57 @@ export async function GET(req: Request) {
         continue;
       }
 
-      const ids = (candidates ?? []).map((x: any) => x.id as string);
-      const candidateCount = ids.length;
+      const candidateIds = (candidates ?? []).map((x: any) => x.id as string);
+      const candidateCount = candidateIds.length;
 
+      // ---- update by FILTER (idempotent + no in(ids)) ----
+      // Important: include status=scheduled again in update filter so we don't rewrite rows that changed meanwhile.
       let clinicUpdatedCount = 0;
       let clinicUpdatedIds: string[] = [];
 
-      // ---- update ----
-      if (ids.length > 0) {
-        const { data: updated, error: updError } = await supabase
-          .from("appointments")
-          .update({ status: "no_show", no_show_fee_charged: false })
-          .in("id", ids)
-          .select("id");
+      const { data: updated, error: updError } = await supabase
+        .from("appointments")
+        .update({ status: "no_show", no_show_fee_charged: false })
+        .eq("clinic_id", clinicId)
+        .eq("status", "scheduled")
+        .is("checked_in_at", null)
+        .lte("starts_at", thresholdIso)
+        .is("cancelled_at", null)
+        .is("canceled_at", null)
+        .or("no_show_excused.is.null,no_show_excused.eq.false")
+        .select("id");
 
-        if (updError) {
-          await supabase.from("cron_runs").insert({
-            clinic_id: clinicId,
-            job: "no-shows",
-            candidate_count: candidateCount,
-            updated_count: 0,
-            details: {
-              ok: false,
-              step: "update-error",
-              error: updError.message,
-              now: now.toISOString(),
-              graceMinutes,
-              thresholdIso,
-              ids,
-              settingsStatus,
-              settingsErrorMsg,
-            },
-          });
-
-          perClinic.push({
-            clinicId,
-            candidateCount,
-            updatedCount: 0,
+      if (updError) {
+        await supabase.from("cron_runs").insert({
+          clinic_id: clinicId,
+          job: "no-shows",
+          candidate_count: candidateCount,
+          updated_count: 0,
+          details: {
+            ok: false,
+            step: "update-error",
             error: updError.message,
-          });
-          continue;
-        }
+            now: now.toISOString(),
+            graceMinutes,
+            thresholdIso,
+            // return only sampled ids
+            sampleCandidateIds: candidateIds,
+            settingsStatus,
+            settingsErrorMsg,
+          },
+        });
 
-        clinicUpdatedIds = (updated ?? []).map((u: any) => u.id as string);
-        clinicUpdatedCount = clinicUpdatedIds.length;
+        perClinic.push({
+          clinicId,
+          candidateCount,
+          updatedCount: 0,
+          error: updError.message,
+        });
+        continue;
       }
+
+      clinicUpdatedIds = (updated ?? []).map((u: any) => u.id as string);
+      clinicUpdatedCount = clinicUpdatedIds.length;
 
       // ---- logging ----
       const { error: logError } = await supabase.from("cron_runs").insert({
@@ -189,9 +185,13 @@ export async function GET(req: Request) {
           now: now.toISOString(),
           graceMinutes,
           thresholdIso,
-          updatedIds: clinicUpdatedIds,
+          updatedIds: clinicUpdatedIds.slice(0, 500),
           settingsStatus,
           settingsErrorMsg,
+          note:
+            candidateCount >= 500
+              ? "Candidate list truncated to 500 for response/log; update still applied to all matches."
+              : null,
         },
       });
 
@@ -213,7 +213,7 @@ export async function GET(req: Request) {
         now: now.toISOString(),
         candidateCount: totalCandidateCount,
         updatedCount: totalUpdatedCount,
-        updatedIds,
+        updatedIds: updatedIds.slice(0, 1000),
         perClinic,
       },
       { status: 200 }
