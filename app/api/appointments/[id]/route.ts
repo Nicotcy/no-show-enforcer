@@ -83,8 +83,15 @@ export async function PATCH(
     );
   }
 
-  // Check-in
+  // Check-in (HARDENED): only scheduled/late can be checked-in
   if (action === "check_in") {
+    if (!(currentStatus === "scheduled" || currentStatus === "late")) {
+      return NextResponse.json(
+        { error: "Only scheduled/late appointments can be checked-in." },
+        { status: 400 }
+      );
+    }
+
     const { data: updated, error: updErr } = await ctx.supabaseAdmin
       .from("appointments")
       .update({
@@ -162,7 +169,6 @@ export async function PATCH(
 
     const start = parseStartsAtUtc(current.starts_at);
 
-    // late cancel only makes sense if appointment is still in the future
     if (start && windowMins > 0) {
       const minsUntil = minutesUntil(start, now);
 
