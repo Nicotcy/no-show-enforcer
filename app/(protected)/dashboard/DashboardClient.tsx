@@ -34,7 +34,11 @@ function toLocalDisplay(isoOrTs: string) {
 
 function datetimeLocalToDb(value: string) {
   if (!value) return "";
-  return `${value}:00`;
+  // value is "YYYY-MM-DDTHH:mm" from datetime-local, interpreted as LOCAL time.
+  // Convert to UTC ISO string with Z so DB timestamptz is consistent.
+  const d = new Date(`${value}:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString();
 }
 
 export default function DashboardClient() {
