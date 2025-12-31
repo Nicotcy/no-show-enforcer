@@ -27,11 +27,63 @@ function clampInt(n: unknown, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, Math.floor(x)));
 }
 
-async function countQuery(q: any) {
-  // Supabase count without fetching rows
-  const { count, error } = await q.select("id", { count: "exact", head: true });
-  if (error) return { count: 0, error: error.message };
-  return { count: count ?? 0, error: null };
+async function countAppointments(args: {
+  clinicId: string;
+  thresholdIso?: string;
+  strictDetectedNull?: boolean;
+}) {
+  const { clinicId, thresholdIso, strictDetectedNull } = args;
+
+  let q = supabase
+    .from("appointments")
+    .select("id", { count: "exact", head: true })
+    .eq("clinic_id", clinicId)
+    .eq("status", "scheduled");
+
+  if (thresholdIso) {
+    q = q
+      .is("checked_in_at", null)
+      .is("cancelled_at", null)
+      .lte("starts_at", thresholdIso)
+      .or("no_show_excused.is.null,no_show_excused.eq.false");
+  }
+
+  if (strictDetectedNull) {
+    q = q.is("no_show_detected_at", null);
+  }
+
+  const { count, error } = await q;
+  return { count: count ?? 0, error: error?.message ?? null };
+}
+
+async function sampleIds(args: {
+  clinicId: string;
+  thresholdIso: string;
+  strictDetectedNull?: boolean;
+}) {
+  const { clinicId, thresholdIso, strictDetectedNull } = args;
+
+  let q = supabase
+    .from("appointments")
+    .select("id")
+    .eq("clinic_id", clinicId)
+    .eq("status", "scheduled")
+    .is("checked_in_at", null)
+    .is("cancelled_at", null)
+    .lte("starts_at", thresholdIso)
+    .or("no_show_excused.is.null,no_show_excused.eq.false")
+    .order("starts_at", { ascending: true })
+    .limit(10);
+
+  if (strictDetectedNull) {
+    q = q.is("no_show_detected_at", null);
+  }
+
+  const { data, error } = await q;
+  return {
+    ids: (data ?? []).map((r: any) => r.id as string),
+    error: error?.message ?? null,
+  };
 }
 
 export async function GET(req: Request) {
@@ -45,7 +97,6 @@ export async function GET(req: Request) {
 
     const now = new Date();
 
-    // 1) clinics
     const { data: clinics, error: clinicsError } = await supabase
       .from("clinics")
       .select("id");
@@ -86,100 +137,57 @@ export async function GET(req: Request) {
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
       const thresholdIso = threshold.toISOString();
 
-      // Base filters (the ones that should always apply)
-      const base = supabase
-        .from("appointments")
-        .eq("clinic_id", clinicId)
-        .eq("status", "scheduled")
-        .is("checked_in_at", null)
-        .is("cancelled_at", null)
-        .lte("starts_at", thresholdIso)
-        .or("no_show_excused.is.null,no_show_excused.eq.false");
-
-      // Counts for debug
-      let scheduledCount = null;
-      let eligibleNoDetectedCount = null;
-      let eligibleStrictCount = null;
-      let debugSampleIdsNoDetected: string[] | null = null;
-      let debugSampleIdsStrict: string[] | null = null;
-      let debugCountErrors: any = null;
-
+      // Debug counts (optional)
+      let debugBlock: any = undefined;
       if (debug) {
-        // scheduled total for clinic (independent of time)
-        const scheduledTotal = await countQuery(
-          supabase
-            .from("appointments")
-            .eq("clinic_id", clinicId)
-            .eq("status", "scheduled")
-        );
+        const scheduledTotal = await countAppointments({ clinicId });
+        const eligibleNoDetected = await countAppointments({
+          clinicId,
+          thresholdIso,
+          strictDetectedNull: false,
+        });
+        const eligibleStrict = await countAppointments({
+          clinicId,
+          thresholdIso,
+          strictDetectedNull: true,
+        });
 
-        // eligible without no_show_detected_at filter
-        const eligibleNoDetected = await countQuery(
-          supabase.from("appointments").match({
-            clinic_id: clinicId,
-            status: "scheduled",
-          })
-            .is("checked_in_at", null)
-            .is("cancelled_at", null)
-            .lte("starts_at", thresholdIso)
-            .or("no_show_excused.is.null,no_show_excused.eq.false")
-        );
+        const sampleNoDetected = await sampleIds({
+          clinicId,
+          thresholdIso,
+          strictDetectedNull: false,
+        });
+        const sampleStrict = await sampleIds({
+          clinicId,
+          thresholdIso,
+          strictDetectedNull: true,
+        });
 
-        // eligible with no_show_detected_at IS NULL (strict)
-        const eligibleStrict = await countQuery(
-          supabase.from("appointments").match({
-            clinic_id: clinicId,
-            status: "scheduled",
-          })
-            .is("checked_in_at", null)
-            .is("cancelled_at", null)
-            .is("no_show_detected_at", null)
-            .lte("starts_at", thresholdIso)
-            .or("no_show_excused.is.null,no_show_excused.eq.false")
-        );
-
-        scheduledCount = scheduledTotal.count;
-        eligibleNoDetectedCount = eligibleNoDetected.count;
-        eligibleStrictCount = eligibleStrict.count;
-
-        debugCountErrors = {
-          scheduledTotalError: scheduledTotal.error,
-          eligibleNoDetectedError: eligibleNoDetected.error,
-          eligibleStrictError: eligibleStrict.error,
+        debugBlock = {
+          graceMinutes,
+          thresholdIso,
+          counts: {
+            scheduledTotal: scheduledTotal.count,
+            eligibleNoDetected: eligibleNoDetected.count,
+            eligibleStrict: eligibleStrict.count,
+          },
+          countErrors: {
+            scheduledTotal: scheduledTotal.error,
+            eligibleNoDetected: eligibleNoDetected.error,
+            eligibleStrict: eligibleStrict.error,
+          },
+          sampleIds: {
+            eligibleNoDetected: sampleNoDetected.ids,
+            eligibleStrict: sampleStrict.ids,
+          },
+          sampleErrors: {
+            eligibleNoDetected: sampleNoDetected.error,
+            eligibleStrict: sampleStrict.error,
+          },
         };
-
-        // Sample IDs
-        const { data: sample1 } = await supabase
-          .from("appointments")
-          .select("id")
-          .eq("clinic_id", clinicId)
-          .eq("status", "scheduled")
-          .is("checked_in_at", null)
-          .is("cancelled_at", null)
-          .lte("starts_at", thresholdIso)
-          .or("no_show_excused.is.null,no_show_excused.eq.false")
-          .order("starts_at", { ascending: true })
-          .limit(10);
-
-        debugSampleIdsNoDetected = (sample1 ?? []).map((r: any) => r.id as string);
-
-        const { data: sample2 } = await supabase
-          .from("appointments")
-          .select("id")
-          .eq("clinic_id", clinicId)
-          .eq("status", "scheduled")
-          .is("checked_in_at", null)
-          .is("cancelled_at", null)
-          .is("no_show_detected_at", null)
-          .lte("starts_at", thresholdIso)
-          .or("no_show_excused.is.null,no_show_excused.eq.false")
-          .order("starts_at", { ascending: true })
-          .limit(10);
-
-        debugSampleIdsStrict = (sample2 ?? []).map((r: any) => r.id as string);
       }
 
-      // Candidates (strict) - what we really use to update
+      // Candidates (strict)
       const { data: candidates, error: candError } = await supabase
         .from("appointments")
         .select("id")
@@ -197,18 +205,7 @@ export async function GET(req: Request) {
           error: candError.message,
           settingsStatus,
           settingsErrorMsg,
-          graceMinutes,
-          thresholdIso,
-          debug: debug
-            ? {
-                scheduledCount,
-                eligibleNoDetectedCount,
-                eligibleStrictCount,
-                debugCountErrors,
-                debugSampleIdsNoDetected,
-                debugSampleIdsStrict,
-              }
-            : undefined,
+          debug: debugBlock,
         });
         continue;
       }
@@ -237,18 +234,7 @@ export async function GET(req: Request) {
             error: updError.message,
             settingsStatus,
             settingsErrorMsg,
-            graceMinutes,
-            thresholdIso,
-            debug: debug
-              ? {
-                  scheduledCount,
-                  eligibleNoDetectedCount,
-                  eligibleStrictCount,
-                  debugCountErrors,
-                  debugSampleIdsNoDetected,
-                  debugSampleIdsStrict,
-                }
-              : undefined,
+            debug: debugBlock,
           });
           continue;
         }
@@ -263,18 +249,7 @@ export async function GET(req: Request) {
         updatedCount,
         settingsStatus,
         settingsErrorMsg,
-        graceMinutes,
-        thresholdIso,
-        debug: debug
-          ? {
-              scheduledCount,
-              eligibleNoDetectedCount,
-              eligibleStrictCount,
-              debugCountErrors,
-              debugSampleIdsNoDetected,
-              debugSampleIdsStrict,
-            }
-          : undefined,
+        debug: debugBlock,
       });
     }
 
