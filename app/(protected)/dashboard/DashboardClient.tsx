@@ -38,12 +38,14 @@ export default function DashboardClient() {
   const [patientName, setPatientName] = useState("");
   const [startsAtLocal, setStartsAtLocal] = useState("");
 
-  const [adding, setAdding] = useState(false); // 👈 NUEVO
+  // Anti-spam create
+  const [adding, setAdding] = useState(false);
   const addCooldownRef = useRef<number | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
+  // Per-row pending state for actions
   const [pendingById, setPendingById] = useState<Record<string, boolean>>({});
 
   const dateInputRef = useRef<HTMLInputElement | null>(null);
@@ -103,7 +105,7 @@ export default function DashboardClient() {
   }, [appointments]);
 
   async function addAppointment() {
-    if (adding) return; // 🔒 hard guard
+    if (adding) return;
 
     setError(null);
     setInfo(null);
@@ -120,7 +122,7 @@ export default function DashboardClient() {
       return;
     }
 
-    // 🔥 LIMPIAMOS INPUTS INMEDIATAMENTE
+    // Clear inputs immediately to prevent accidental double submission
     setPatientName("");
     setStartsAtLocal("");
     setAdding(true);
@@ -144,15 +146,13 @@ export default function DashboardClient() {
 
       setInfo("Appointment created.");
 
-      // Mantener reload completo aquí (normalización server)
+      // Keep full reload after create (server normalization)
       await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to create appointment");
     } finally {
-      // ⏱️ COOLDOWN ANTI-SPAM (800 ms)
-      if (addCooldownRef.current) {
-        window.clearTimeout(addCooldownRef.current);
-      }
+      // small cooldown to avoid spam clicks / double enter
+      if (addCooldownRef.current) window.clearTimeout(addCooldownRef.current);
       addCooldownRef.current = window.setTimeout(() => {
         setAdding(false);
       }, 800);
@@ -170,9 +170,7 @@ export default function DashboardClient() {
       const res = await fetch(`/api/appointments/${id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          isCheckIn ? { action: "check_in" } : { status }
-        ),
+        body: JSON.stringify(isCheckIn ? { action: "check_in" } : { status }),
       });
 
       const json = await res.json().catch(() => ({}));
@@ -244,7 +242,14 @@ export default function DashboardClient() {
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          marginBottom: 16,
+        }}
+      >
         <input
           placeholder="Patient name"
           value={patientName}
@@ -272,7 +277,11 @@ export default function DashboardClient() {
           style={{ padding: 10 }}
         />
 
-        <button onClick={addAppointment} disabled={adding} style={{ padding: "10px 14px" }}>
+        <button
+          onClick={addAppointment}
+          disabled={adding}
+          style={{ padding: "10px 14px" }}
+        >
           {adding ? "Adding…" : "Add"}
         </button>
 
@@ -283,4 +292,92 @@ export default function DashboardClient() {
         {loading && <span style={{ opacity: 0.7 }}>Loading…</span>}
       </div>
 
-      {/* resto del componente: tabla SIN CAMBIOS */}
+      <div style={{ overflowX: "auto" }}>
+        <table
+          style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}
+        >
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
+              <th style={{ padding: 10 }}>Patient</th>
+              <th style={{ padding: 10 }}>Starts at</th>
+              <th style={{ padding: 10 }}>Status</th>
+              <th style={{ padding: 10 }}>Checked-in</th>
+              <th style={{ padding: 10 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedAppointments.map((a) => {
+              const checkedIn = a.checked_in_at ? "Yes" : "No";
+              const isPending = Boolean(pendingById[a.id]);
+
+              const statusLabel =
+                a.status === "no_show" && a.no_show_excused
+                  ? "no_show (excused)"
+                  : String(a.status);
+
+              return (
+                <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
+                  <td style={{ padding: 10 }}>{a.patient_name}</td>
+                  <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
+                  <td style={{ padding: 10 }}>
+                    {statusLabel}
+                    {isPending && (
+                      <span style={{ marginLeft: 8, opacity: 0.7 }}>
+                        Saving…
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: 10 }}>{checkedIn}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "checked_in")}
+                      style={{ marginRight: 8 }}
+                    >
+                      Check-in
+                    </button>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "late")}
+                      style={{ marginRight: 8 }}
+                    >
+                      Mark late
+                    </button>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "no_show")}
+                      style={{ marginRight: 8 }}
+                    >
+                      Mark no-show
+                    </button>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "canceled")}
+                      style={{ marginRight: 8 }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      disabled={isPending}
+                      onClick={() => excuseNoShow(a.id)}
+                    >
+                      Excuse
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+
+            {sortedAppointments.length === 0 && !loading && (
+              <tr>
+                <td style={{ padding: 10, opacity: 0.7 }} colSpan={5}>
+                  No appointments yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
