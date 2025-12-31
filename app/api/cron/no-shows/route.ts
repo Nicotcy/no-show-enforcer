@@ -3,11 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL as string,
-  process.env.SUPABASE_SERVICE_ROLE_KEY as string,
-  { auth: { persistSession: false } }
-);
+const supabaseUrl = process.env.SUPABASE_URL as string;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
+
+const supabase = createClient(supabaseUrl, serviceRoleKey, {
+  auth: { persistSession: false },
+});
 
 function isAuthorized(req: Request) {
   const url = new URL(req.url);
@@ -27,6 +28,14 @@ function clampInt(n: unknown, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, Math.floor(x)));
 }
 
+function supabaseHost(url: string) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 export async function GET(req: Request) {
   try {
     if (!isAuthorized(req)) {
@@ -34,6 +43,46 @@ export async function GET(req: Request) {
     }
 
     const now = new Date();
+
+    // ---------- PREFLIGHT: confirm schema on the SAME DB Vercel is using ----------
+    const { data: colRows, error: colErr } = await supabase
+      .from("information_schema.columns")
+      .select("column_name,data_type,is_nullable,column_default")
+      .eq("table_schema", "public")
+      .eq("table_name", "appointments")
+      .order("ordinal_position", { ascending: true });
+
+    if (colErr) {
+      return NextResponse.json(
+        {
+          step: "preflight-columns-error",
+          error: colErr.message,
+          supabaseHost: supabaseHost(supabaseUrl),
+          hint:
+            "If this fails, your DB user may not have access to information_schema through PostgREST. We can switch to an RPC if needed.",
+        },
+        { status: 500 }
+      );
+    }
+
+    const columns = (colRows ?? []).map((r: any) => r.column_name);
+    const hasNoShowExcused = columns.includes("no_show_excused");
+
+    if (!hasNoShowExcused) {
+      return NextResponse.json(
+        {
+          step: "preflight-missing-column",
+          error:
+            "public.appointments.no_show_excused is missing in the DB this deployment is using.",
+          supabaseHost: supabaseHost(supabaseUrl),
+          columnsSample: columns,
+          fix:
+            "Run the ALTER TABLE in the Supabase project that matches this supabaseHost. If your Supabase dashboard shows the column but this says missing, your Vercel env SUPABASE_URL points to a different project.",
+        },
+        { status: 500 }
+      );
+    }
+    // ---------- END PREFLIGHT ----------
 
     // 1) clinics
     const { data: clinics, error: clinicsError } = await supabase
@@ -52,37 +101,40 @@ export async function GET(req: Request) {
     const updatedIds: string[] = [];
     const perClinic: any[] = [];
 
+    // 2) per clinic
     for (const c of clinics ?? []) {
       const clinicId = c.id as string;
 
-      // ---- settings (robust) ----
+      // ---- settings (robust, no .single()) ----
       let graceMinutes = 10;
       let settingsStatus: "ok" | "missing" | "error" = "ok";
       let settingsErrorMsg: string | null = null;
 
-      const { data: settingsRow, error: settingsError } = await supabase
+      const { data: settingsRows, error: settingsError } = await supabase
         .from("clinic_settings")
         .select("grace_minutes")
         .eq("clinic_id", clinicId)
-        .maybeSingle();
+        .limit(1);
 
       if (settingsError) {
         settingsStatus = "error";
         settingsErrorMsg = settingsError.message;
-      } else if (settingsRow && typeof (settingsRow as any)?.grace_minutes !== "undefined") {
-        graceMinutes = clampInt((settingsRow as any).grace_minutes, 0, 240, 10);
+      } else if (settingsRows && settingsRows.length > 0) {
+        const row = settingsRows[0] as any;
+        graceMinutes = clampInt(row?.grace_minutes, 0, 240, 10);
       } else {
         settingsStatus = "missing";
       }
 
-      // threshold = now - graceMinutes
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
 
-      // Use full ISO (with Z). This is safest for timestamptz columns.
-      const thresholdIso = threshold.toISOString();
+      // Keep your DB comparison style for now (since your starts_at is timestamp without time zone)
+      const thresholdIso = threshold
+        .toISOString()
+        .replace(".000Z", "")
+        .replace("Z", "");
 
-      // ---- candidates query (ONLY count + ids for response) ----
-      // We keep this select for observability, but LIMIT it so we don't return huge arrays.
+      // ---- candidates query ----
       const { data: candidates, error: candError } = await supabase
         .from("appointments")
         .select("id")
@@ -90,29 +142,11 @@ export async function GET(req: Request) {
         .eq("status", "scheduled")
         .is("checked_in_at", null)
         .lte("starts_at", thresholdIso)
-        .is("cancelled_at", null)
         .is("canceled_at", null)
-        .or("no_show_excused.is.null,no_show_excused.eq.false")
-        .limit(500); // avoid huge payloads in case someone imported tons of appointments
+        .is("cancelled_at", null)
+        .or("no_show_excused.is.null,no_show_excused.eq.false");
 
       if (candError) {
-        await supabase.from("cron_runs").insert({
-          clinic_id: clinicId,
-          job: "no-shows",
-          candidate_count: 0,
-          updated_count: 0,
-          details: {
-            ok: false,
-            step: "candidates-error",
-            error: candError.message,
-            now: now.toISOString(),
-            graceMinutes,
-            thresholdIso,
-            settingsStatus,
-            settingsErrorMsg,
-          },
-        });
-
         perClinic.push({
           clinicId,
           candidateCount: 0,
@@ -122,78 +156,32 @@ export async function GET(req: Request) {
         continue;
       }
 
-      const candidateIds = (candidates ?? []).map((x: any) => x.id as string);
-      const candidateCount = candidateIds.length;
+      const ids = (candidates ?? []).map((x: any) => x.id as string);
+      const candidateCount = ids.length;
 
-      // ---- update by FILTER (idempotent + no in(ids)) ----
-      // Important: include status=scheduled again in update filter so we don't rewrite rows that changed meanwhile.
       let clinicUpdatedCount = 0;
       let clinicUpdatedIds: string[] = [];
 
-      const { data: updated, error: updError } = await supabase
-        .from("appointments")
-        .update({ status: "no_show", no_show_fee_charged: false })
-        .eq("clinic_id", clinicId)
-        .eq("status", "scheduled")
-        .is("checked_in_at", null)
-        .lte("starts_at", thresholdIso)
-        .is("cancelled_at", null)
-        .is("canceled_at", null)
-        .or("no_show_excused.is.null,no_show_excused.eq.false")
-        .select("id");
+      if (ids.length > 0) {
+        const { data: updated, error: updError } = await supabase
+          .from("appointments")
+          .update({ status: "no_show", no_show_fee_charged: false })
+          .in("id", ids)
+          .select("id");
 
-      if (updError) {
-        await supabase.from("cron_runs").insert({
-          clinic_id: clinicId,
-          job: "no-shows",
-          candidate_count: candidateCount,
-          updated_count: 0,
-          details: {
-            ok: false,
-            step: "update-error",
+        if (updError) {
+          perClinic.push({
+            clinicId,
+            candidateCount,
+            updatedCount: 0,
             error: updError.message,
-            now: now.toISOString(),
-            graceMinutes,
-            thresholdIso,
-            // return only sampled ids
-            sampleCandidateIds: candidateIds,
-            settingsStatus,
-            settingsErrorMsg,
-          },
-        });
+          });
+          continue;
+        }
 
-        perClinic.push({
-          clinicId,
-          candidateCount,
-          updatedCount: 0,
-          error: updError.message,
-        });
-        continue;
+        clinicUpdatedIds = (updated ?? []).map((u: any) => u.id as string);
+        clinicUpdatedCount = clinicUpdatedIds.length;
       }
-
-      clinicUpdatedIds = (updated ?? []).map((u: any) => u.id as string);
-      clinicUpdatedCount = clinicUpdatedIds.length;
-
-      // ---- logging ----
-      const { error: logError } = await supabase.from("cron_runs").insert({
-        clinic_id: clinicId,
-        job: "no-shows",
-        candidate_count: candidateCount,
-        updated_count: clinicUpdatedCount,
-        details: {
-          ok: true,
-          now: now.toISOString(),
-          graceMinutes,
-          thresholdIso,
-          updatedIds: clinicUpdatedIds.slice(0, 500),
-          settingsStatus,
-          settingsErrorMsg,
-          note:
-            candidateCount >= 500
-              ? "Candidate list truncated to 500 for response/log; update still applied to all matches."
-              : null,
-        },
-      });
 
       totalCandidateCount += candidateCount;
       totalUpdatedCount += clinicUpdatedCount;
@@ -203,7 +191,6 @@ export async function GET(req: Request) {
         clinicId,
         candidateCount,
         updatedCount: clinicUpdatedCount,
-        logError: logError ? logError.message : null,
       });
     }
 
@@ -211,9 +198,10 @@ export async function GET(req: Request) {
       {
         step: "done",
         now: now.toISOString(),
+        supabaseHost: supabaseHost(supabaseUrl),
         candidateCount: totalCandidateCount,
         updatedCount: totalUpdatedCount,
-        updatedIds: updatedIds.slice(0, 1000),
+        updatedIds,
         perClinic,
       },
       { status: 200 }
