@@ -2,7 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type AllowedStatus = "scheduled" | "checked_in" | "late" | "no_show" | "canceled";
+type AllowedStatus =
+  | "scheduled"
+  | "checked_in"
+  | "late"
+  | "no_show"
+  | "canceled"
+  | "late_cancel";
 
 type Appointment = {
   id: string;
@@ -38,14 +44,12 @@ export default function DashboardClient() {
   const [patientName, setPatientName] = useState("");
   const [startsAtLocal, setStartsAtLocal] = useState("");
 
-  // Anti-spam create
   const [adding, setAdding] = useState(false);
   const addCooldownRef = useRef<number | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Per-row pending state for actions
   const [pendingById, setPendingById] = useState<Record<string, boolean>>({});
 
   const dateInputRef = useRef<HTMLInputElement | null>(null);
@@ -122,7 +126,6 @@ export default function DashboardClient() {
       return;
     }
 
-    // Clear inputs immediately to prevent accidental double submission
     setPatientName("");
     setStartsAtLocal("");
     setAdding(true);
@@ -145,13 +148,10 @@ export default function DashboardClient() {
       }
 
       setInfo("Appointment created.");
-
-      // Keep full reload after create (server normalization)
       await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to create appointment");
     } finally {
-      // small cooldown to avoid spam clicks / double enter
       if (addCooldownRef.current) window.clearTimeout(addCooldownRef.current);
       addCooldownRef.current = window.setTimeout(() => {
         setAdding(false);
@@ -225,6 +225,12 @@ export default function DashboardClient() {
     else el.focus();
   }
 
+  function formatStatus(a: Appointment) {
+    if (a.status === "no_show" && a.no_show_excused) return "no_show (excused)";
+    if (a.status === "late_cancel") return "late_cancel (fee candidate)";
+    return String(a.status);
+  }
+
   return (
     <div style={{ padding: 24 }}>
       <h1 style={{ fontSize: 24, marginBottom: 16 }}>Appointments</h1>
@@ -242,14 +248,7 @@ export default function DashboardClient() {
         </div>
       )}
 
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
         <input
           placeholder="Patient name"
           value={patientName}
@@ -277,11 +276,7 @@ export default function DashboardClient() {
           style={{ padding: 10 }}
         />
 
-        <button
-          onClick={addAppointment}
-          disabled={adding}
-          style={{ padding: "10px 14px" }}
-        >
+        <button onClick={addAppointment} disabled={adding} style={{ padding: "10px 14px" }}>
           {adding ? "Adding…" : "Add"}
         </button>
 
@@ -293,9 +288,7 @@ export default function DashboardClient() {
       </div>
 
       <div style={{ overflowX: "auto" }}>
-        <table
-          style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}
-        >
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 900 }}>
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
               <th style={{ padding: 10 }}>Patient</th>
@@ -310,22 +303,13 @@ export default function DashboardClient() {
               const checkedIn = a.checked_in_at ? "Yes" : "No";
               const isPending = Boolean(pendingById[a.id]);
 
-              const statusLabel =
-                a.status === "no_show" && a.no_show_excused
-                  ? "no_show (excused)"
-                  : String(a.status);
-
               return (
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
                   <td style={{ padding: 10 }}>{a.patient_name}</td>
                   <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
                   <td style={{ padding: 10 }}>
-                    {statusLabel}
-                    {isPending && (
-                      <span style={{ marginLeft: 8, opacity: 0.7 }}>
-                        Saving…
-                      </span>
-                    )}
+                    {formatStatus(a)}
+                    {isPending && <span style={{ marginLeft: 8, opacity: 0.7 }}>Saving…</span>}
                   </td>
                   <td style={{ padding: 10 }}>{checkedIn}</td>
                   <td style={{ padding: 10, whiteSpace: "nowrap" }}>
@@ -357,10 +341,7 @@ export default function DashboardClient() {
                     >
                       Cancel
                     </button>
-                    <button
-                      disabled={isPending}
-                      onClick={() => excuseNoShow(a.id)}
-                    >
+                    <button disabled={isPending} onClick={() => excuseNoShow(a.id)}>
                       Excuse
                     </button>
                   </td>
