@@ -19,13 +19,23 @@ function normalizeStatus(input: unknown): Status | null {
   return (ALLOWED_STATUSES as readonly string[]).includes(s) ? (s as Status) : null;
 }
 
-function minutesDiff(from: Date, to: Date) {
-  return Math.floor((to.getTime() - from.getTime()) / 60000);
-}
-
-// from now -> start (positive if start is in future)
 function minutesUntil(start: Date, now: Date) {
   return Math.floor((start.getTime() - now.getTime()) / 60000);
+}
+
+// Parse starts_at as UTC.
+// If it has no timezone suffix (Z or +/-hh:mm), treat it as UTC and append Z.
+function parseStartsAtUtc(raw: unknown): Date | null {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+
+  const hasTz =
+    s.endsWith("Z") || /[+\-]\d{2}:\d{2}$/.test(s) || /[+\-]\d{2}\d{2}$/.test(s);
+
+  const iso = hasTz ? s : `${s}Z`;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
 }
 
 export async function PATCH(
@@ -150,14 +160,12 @@ export async function PATCH(
       ? Math.max(0, Math.min(10080, Math.floor(windowMinsRaw)))
       : 60;
 
-    // starts_at is stored as UTC-ish string; Date() can parse ISO and "YYYY-MM-DDTHH:mm:ss"
-    const start = new Date(String(current.starts_at));
-    const startValid = !Number.isNaN(start.getTime());
+    const start = parseStartsAtUtc(current.starts_at);
 
-    if (startValid && windowMins > 0) {
+    // late cancel only makes sense if appointment is still in the future
+    if (start && windowMins > 0) {
       const minsUntil = minutesUntil(start, now);
 
-      // late cancel only makes sense if appointment is still in the future
       if (minsUntil >= 0 && minsUntil <= windowMins) {
         statusToSave = "late_cancel";
       } else {
