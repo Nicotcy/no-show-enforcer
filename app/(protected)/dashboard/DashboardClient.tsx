@@ -227,7 +227,7 @@ export default function DashboardClient() {
 
   function formatStatus(a: Appointment) {
     if (a.status === "no_show" && a.no_show_excused) return "no_show (excused)";
-    if (a.status === "late_cancel") return "late_cancel (fee candidate)";
+    if (a.status === "late_cancel") return "late_cancel";
     return String(a.status);
   }
 
@@ -303,6 +303,21 @@ export default function DashboardClient() {
               const checkedIn = a.checked_in_at ? "Yes" : "No";
               const isPending = Boolean(pendingById[a.id]);
 
+              const status = String(a.status).toLowerCase();
+              const isScheduled = status === "scheduled";
+              const isLate = status === "late";
+              const isNoShow = status === "no_show";
+              const isCheckedIn = status === "checked_in";
+              const isTerminal = status === "canceled" || status === "late_cancel";
+
+              const canCheckIn = (isScheduled || isLate) && !isPending && !isTerminal;
+              const canMarkLate = isScheduled && !isPending && !isTerminal;
+              const canMarkNoShow = (isScheduled || isLate) && !isPending && !isTerminal;
+              const canCancel = (isScheduled || isLate) && !isPending && !isTerminal && !isCheckedIn && !isNoShow;
+
+              const alreadyExcused = Boolean(a.no_show_excused);
+              const canExcuse = isNoShow && !alreadyExcused && !isPending && !isTerminal;
+
               return (
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
                   <td style={{ padding: 10 }}>{a.patient_name}</td>
@@ -314,35 +329,53 @@ export default function DashboardClient() {
                   <td style={{ padding: 10 }}>{checkedIn}</td>
                   <td style={{ padding: 10, whiteSpace: "nowrap" }}>
                     <button
-                      disabled={isPending}
+                      disabled={!canCheckIn}
                       onClick={() => updateStatus(a.id, "checked_in")}
                       style={{ marginRight: 8 }}
+                      title={!canCheckIn ? "Only scheduled/late can be checked-in" : "Check-in"}
                     >
                       Check-in
                     </button>
+
                     <button
-                      disabled={isPending}
+                      disabled={!canMarkLate}
                       onClick={() => updateStatus(a.id, "late")}
                       style={{ marginRight: 8 }}
+                      title={!canMarkLate ? "Only scheduled can be marked late" : "Mark late"}
                     >
                       Mark late
                     </button>
+
                     <button
-                      disabled={isPending}
+                      disabled={!canMarkNoShow}
                       onClick={() => updateStatus(a.id, "no_show")}
                       style={{ marginRight: 8 }}
+                      title={!canMarkNoShow ? "Only scheduled/late can be marked no-show" : "Mark no-show"}
                     >
                       Mark no-show
                     </button>
+
                     <button
-                      disabled={isPending}
+                      disabled={!canCancel}
                       onClick={() => updateStatus(a.id, "canceled")}
                       style={{ marginRight: 8 }}
+                      title={!canCancel ? "Only scheduled/late can be canceled" : "Cancel"}
                     >
                       Cancel
                     </button>
-                    <button disabled={isPending} onClick={() => excuseNoShow(a.id)}>
-                      Excuse
+
+                    <button
+                      disabled={!canExcuse}
+                      onClick={() => excuseNoShow(a.id)}
+                      title={
+                        alreadyExcused
+                          ? "Already excused"
+                          : !canExcuse
+                          ? "Only no-show can be excused"
+                          : "Excuse"
+                      }
+                    >
+                      {alreadyExcused ? "Excused" : "Excuse"}
                     </button>
                   </td>
                 </tr>
