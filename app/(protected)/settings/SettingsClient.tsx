@@ -2,13 +2,38 @@
 
 import { useEffect, useState } from "react";
 
+type Currency = "EUR" | "USD" | "GBP";
+
 type Settings = {
   grace_minutes: number;
   late_cancel_window_minutes: number;
   no_show_fee_cents: number;
   auto_charge_enabled: boolean;
-  currency: "EUR" | "USD" | "GBP";
+  currency: Currency;
 };
+
+// UI form uses strings for number fields to allow empty input
+type SettingsForm = {
+  grace_minutes: string;
+  late_cancel_window_minutes: string;
+  no_show_fee_cents: string;
+  auto_charge_enabled: boolean;
+  currency: Currency;
+};
+
+function numToField(n: number) {
+  // show empty when 0, so user doesn't have to "fight" the 0
+  if (!Number.isFinite(n) || n === 0) return "";
+  return String(n);
+}
+
+function clampInt(value: string, min: number, max: number, fallback: number) {
+  const t = value.trim();
+  if (!t) return fallback;
+  const n = Math.floor(Number(t));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
 
 export default function SettingsClient() {
   const [loading, setLoading] = useState(true);
@@ -16,10 +41,10 @@ export default function SettingsClient() {
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
-  const [form, setForm] = useState<Settings>({
-    grace_minutes: 10,
-    late_cancel_window_minutes: 60,
-    no_show_fee_cents: 0,
+  const [form, setForm] = useState<SettingsForm>({
+    grace_minutes: "10",
+    late_cancel_window_minutes: "60",
+    no_show_fee_cents: "",
     auto_charge_enabled: false,
     currency: "EUR",
   });
@@ -37,12 +62,16 @@ export default function SettingsClient() {
       return;
     }
 
+    const grace = Number(j.grace_minutes ?? 10);
+    const windowMins = Number(j.late_cancel_window_minutes ?? 60);
+    const fee = Number(j.no_show_fee_cents ?? 0);
+
     setForm({
-      grace_minutes: Number(j.grace_minutes ?? 10),
-      late_cancel_window_minutes: Number(j.late_cancel_window_minutes ?? 60),
-      no_show_fee_cents: Number(j.no_show_fee_cents ?? 0),
+      grace_minutes: numToField(grace),
+      late_cancel_window_minutes: numToField(windowMins),
+      no_show_fee_cents: numToField(fee),
       auto_charge_enabled: Boolean(j.auto_charge_enabled ?? false),
-      currency: (j.currency ?? "EUR") as Settings["currency"],
+      currency: (j.currency ?? "EUR") as Currency,
     });
 
     setLoading(false);
@@ -53,11 +82,26 @@ export default function SettingsClient() {
     setError(null);
     setOk(null);
 
+    // Convert UI fields -> Settings numbers (empty becomes 0)
+    const payload: Settings = {
+      grace_minutes: clampInt(form.grace_minutes, 0, 240, 10),
+      late_cancel_window_minutes: clampInt(
+        form.late_cancel_window_minutes,
+        0,
+        10080,
+        60
+      ),
+      no_show_fee_cents: clampInt(form.no_show_fee_cents, 0, 1_000_000, 0),
+      auto_charge_enabled: Boolean(form.auto_charge_enabled),
+      currency: form.currency,
+    };
+
     const r = await fetch("/api/settings", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(form),
+      body: JSON.stringify(payload),
     });
+
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       setError(j?.error ?? "Failed to save");
@@ -66,9 +110,16 @@ export default function SettingsClient() {
     }
 
     // snap back to server-normalized currency, in case someone tampered
-    if (j?.currency) {
-      setForm((f) => ({ ...f, currency: j.currency }));
-    }
+    const normalizedCurrency = (j?.currency ?? payload.currency) as Currency;
+
+    // Also normalize fields after save (keeps things tidy)
+    setForm((f) => ({
+      ...f,
+      grace_minutes: numToField(payload.grace_minutes),
+      late_cancel_window_minutes: numToField(payload.late_cancel_window_minutes),
+      no_show_fee_cents: numToField(payload.no_show_fee_cents),
+      currency: normalizedCurrency,
+    }));
 
     setOk("Saved");
     setSaving(false);
@@ -98,37 +149,72 @@ export default function SettingsClient() {
       <label style={{ display: "block", marginTop: 14 }}>Grace minutes</label>
       <input
         value={form.grace_minutes}
-        onChange={(e) => setForm({ ...form, grace_minutes: Number(e.target.value) })}
-        type="number"
-        min={0}
-        max={240}
+        onChange={(e) =>
+          setForm({ ...form, grace_minutes: e.target.value })
+        }
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={(e) =>
+          setForm((f) => ({
+            ...f,
+            grace_minutes: numToField(clampInt(e.target.value, 0, 240, 10)),
+          }))
+        }
+        inputMode="numeric"
+        pattern="[0-9]*"
+        placeholder="10"
         style={{ width: "100%", padding: 10 }}
       />
 
-      <label style={{ display: "block", marginTop: 14 }}>Late cancel window (minutes)</label>
+      <label style={{ display: "block", marginTop: 14 }}>
+        Late cancel window (minutes)
+      </label>
       <input
         value={form.late_cancel_window_minutes}
-        onChange={(e) => setForm({ ...form, late_cancel_window_minutes: Number(e.target.value) })}
-        type="number"
-        min={0}
-        max={10080}
+        onChange={(e) =>
+          setForm({ ...form, late_cancel_window_minutes: e.target.value })
+        }
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={(e) =>
+          setForm((f) => ({
+            ...f,
+            late_cancel_window_minutes: numToField(
+              clampInt(e.target.value, 0, 10080, 60)
+            ),
+          }))
+        }
+        inputMode="numeric"
+        pattern="[0-9]*"
+        placeholder="60"
         style={{ width: "100%", padding: 10 }}
       />
 
       <label style={{ display: "block", marginTop: 14 }}>No-show fee (cents)</label>
       <input
         value={form.no_show_fee_cents}
-        onChange={(e) => setForm({ ...form, no_show_fee_cents: Number(e.target.value) })}
-        type="number"
-        min={0}
-        max={1000000}
+        onChange={(e) =>
+          setForm({ ...form, no_show_fee_cents: e.target.value })
+        }
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={(e) =>
+          setForm((f) => ({
+            ...f,
+            no_show_fee_cents: numToField(
+              clampInt(e.target.value, 0, 1_000_000, 0)
+            ),
+          }))
+        }
+        inputMode="numeric"
+        pattern="[0-9]*"
+        placeholder="0"
         style={{ width: "100%", padding: 10 }}
       />
 
       <label style={{ display: "block", marginTop: 14 }}>
         <input
           checked={form.auto_charge_enabled}
-          onChange={(e) => setForm({ ...form, auto_charge_enabled: e.target.checked })}
+          onChange={(e) =>
+            setForm({ ...form, auto_charge_enabled: e.target.checked })
+          }
           type="checkbox"
           style={{ marginRight: 8 }}
         />
@@ -138,7 +224,9 @@ export default function SettingsClient() {
       <label style={{ display: "block", marginTop: 14 }}>Currency</label>
       <select
         value={form.currency}
-        onChange={(e) => setForm({ ...form, currency: e.target.value as Settings["currency"] })}
+        onChange={(e) =>
+          setForm({ ...form, currency: e.target.value as Currency })
+        }
         style={{ width: "100%", padding: 10 }}
       >
         <option value="EUR">EUR</option>
