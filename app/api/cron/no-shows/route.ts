@@ -3,13 +3,18 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
-const supabaseUrl = process.env.SUPABASE_URL as string;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
+/**
+ * Service-role Supabase client
+ */
+const supabase = createClient(
+  process.env.SUPABASE_URL as string,
+  process.env.SUPABASE_SERVICE_ROLE_KEY as string,
+  { auth: { persistSession: false } }
+);
 
-const supabase = createClient(supabaseUrl, serviceRoleKey, {
-  auth: { persistSession: false },
-});
-
+/**
+ * Auth: secret via query param OR Authorization header
+ */
 function isAuthorized(req: Request) {
   const url = new URL(req.url);
   const secret = url.searchParams.get("secret");
@@ -20,14 +25,6 @@ function isAuthorized(req: Request) {
     (secret && secret === process.env.CRON_SECRET) ||
     authHeader === expectedHeader
   );
-}
-
-function supabaseHost(url: string) {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
 }
 
 function clampInt(n: unknown, min: number, max: number, fallback: number) {
@@ -44,42 +41,9 @@ export async function GET(req: Request) {
 
     const now = new Date();
 
-    // ---------- PREFLIGHT via RPC ----------
-    const { data: schemaInfo, error: schemaErr } = await supabase.rpc(
-      "debug_appointments_schema"
-    );
-
-    if (schemaErr) {
-      return NextResponse.json(
-        {
-          step: "preflight-rpc-error",
-          error: schemaErr.message,
-          supabaseHost: supabaseHost(supabaseUrl),
-          fix:
-            "Run the SQL to create public.debug_appointments_schema() in this Supabase project.",
-        },
-        { status: 500 }
-      );
-    }
-
-    const hasNoShowExcused = Boolean((schemaInfo as any)?.has_no_show_excused);
-    if (!hasNoShowExcused) {
-      return NextResponse.json(
-        {
-          step: "preflight-missing-column",
-          error:
-            "public.appointments.no_show_excused is missing in the DB this deployment is using.",
-          supabaseHost: supabaseHost(supabaseUrl),
-          schemaInfo,
-          fix:
-            "Run ALTER TABLE on the Supabase project that matches this supabaseHost (Vercel env may point to a different project).",
-        },
-        { status: 500 }
-      );
-    }
-    // ---------- END PREFLIGHT ----------
-
-    // 1) clinics
+    /**
+     * 1) Load all clinics
+     */
     const { data: clinics, error: clinicsError } = await supabase
       .from("clinics")
       .select("id");
@@ -93,48 +57,55 @@ export async function GET(req: Request) {
 
     let totalCandidateCount = 0;
     let totalUpdatedCount = 0;
-    const updatedIds: string[] = [];
     const perClinic: any[] = [];
 
+    /**
+     * 2) Process per clinic
+     */
     for (const c of clinics ?? []) {
       const clinicId = c.id as string;
 
-      // ---- settings ----
+      /**
+       * 2.a) Load grace_minutes
+       */
       let graceMinutes = 10;
       let settingsStatus: "ok" | "missing" | "error" = "ok";
       let settingsErrorMsg: string | null = null;
 
-      const { data: settingsRows, error: settingsError } = await supabase
+      const { data: settingsRow, error: settingsError } = await supabase
         .from("clinic_settings")
         .select("grace_minutes")
         .eq("clinic_id", clinicId)
-        .limit(1);
+        .maybeSingle();
 
       if (settingsError) {
         settingsStatus = "error";
         settingsErrorMsg = settingsError.message;
-      } else if (settingsRows && settingsRows.length > 0) {
-        const row = settingsRows[0] as any;
-        graceMinutes = clampInt(row?.grace_minutes, 0, 240, 10);
+      } else if (settingsRow?.grace_minutes !== undefined) {
+        graceMinutes = clampInt(settingsRow.grace_minutes, 0, 240, 10);
       } else {
         settingsStatus = "missing";
       }
 
+      /**
+       * Threshold = now - graceMinutes
+       * starts_at is timestamptz, so ISO with Z is correct
+       */
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
-
-      // Your DB column starts_at is timestamp without time zone.
-      // You’ve been inserting "UTC without Z", so keep the cron consistent with that for now.
       const thresholdIso = threshold.toISOString();
 
-      // ---- candidates ----
+      /**
+       * 2.b) Find candidates (read-only)
+       */
       const { data: candidates, error: candError } = await supabase
         .from("appointments")
         .select("id")
         .eq("clinic_id", clinicId)
         .eq("status", "scheduled")
         .is("checked_in_at", null)
-        .lte("starts_at", thresholdIso)
         .is("cancelled_at", null)
+        .is("no_show_detected_at", null)
+        .lte("starts_at", thresholdIso)
         .or("no_show_excused.is.null,no_show_excused.eq.false");
 
       if (candError) {
@@ -149,17 +120,29 @@ export async function GET(req: Request) {
         continue;
       }
 
-      const ids = (candidates ?? []).map((x: any) => x.id as string);
-      const candidateCount = ids.length;
+      const candidateCount = (candidates ?? []).length;
+      totalCandidateCount += candidateCount;
 
-      let clinicUpdatedCount = 0;
-      let clinicUpdatedIds: string[] = [];
+      /**
+       * 2.c) Idempotent update
+       */
+      let updatedCount = 0;
 
-      if (ids.length > 0) {
+      if (candidateCount > 0) {
         const { data: updated, error: updError } = await supabase
           .from("appointments")
-          .update({ status: "no_show", no_show_fee_charged: false })
-          .in("id", ids)
+          .update({
+            status: "no_show",
+            no_show_fee_charged: false,
+            no_show_detected_at: now.toISOString(),
+          })
+          .eq("clinic_id", clinicId)
+          .eq("status", "scheduled")
+          .is("checked_in_at", null)
+          .is("cancelled_at", null)
+          .is("no_show_detected_at", null)
+          .lte("starts_at", thresholdIso)
+          .or("no_show_excused.is.null,no_show_excused.eq.false")
           .select("id");
 
         if (updError) {
@@ -174,31 +157,28 @@ export async function GET(req: Request) {
           continue;
         }
 
-        clinicUpdatedIds = (updated ?? []).map((u: any) => u.id as string);
-        clinicUpdatedCount = clinicUpdatedIds.length;
+        updatedCount = (updated ?? []).length;
+        totalUpdatedCount += updatedCount;
       }
-
-      totalCandidateCount += candidateCount;
-      totalUpdatedCount += clinicUpdatedCount;
-      updatedIds.push(...clinicUpdatedIds);
 
       perClinic.push({
         clinicId,
         candidateCount,
-        updatedCount: clinicUpdatedCount,
+        updatedCount,
         settingsStatus,
         settingsErrorMsg,
       });
     }
 
+    /**
+     * 3) Final response
+     */
     return NextResponse.json(
       {
         step: "done",
         now: now.toISOString(),
-        supabaseHost: supabaseHost(supabaseUrl),
         candidateCount: totalCandidateCount,
         updatedCount: totalUpdatedCount,
-        updatedIds,
         perClinic,
       },
       { status: 200 }
