@@ -3,12 +3,29 @@ import { getServerContext } from "@/lib/server/context";
 
 export const runtime = "nodejs";
 
-const ALLOWED_STATUSES = ["scheduled", "checked_in", "late", "no_show", "canceled"] as const;
+const ALLOWED_STATUSES = [
+  "scheduled",
+  "checked_in",
+  "late",
+  "no_show",
+  "canceled",
+  "late_cancel",
+] as const;
+
 type Status = (typeof ALLOWED_STATUSES)[number];
 
 function normalizeStatus(input: unknown): Status | null {
   const s = String(input ?? "").trim().toLowerCase();
   return (ALLOWED_STATUSES as readonly string[]).includes(s) ? (s as Status) : null;
+}
+
+function minutesDiff(from: Date, to: Date) {
+  return Math.floor((to.getTime() - from.getTime()) / 60000);
+}
+
+// from now -> start (positive if start is in future)
+function minutesUntil(start: Date, now: Date) {
+  return Math.floor((start.getTime() - now.getTime()) / 60000);
 }
 
 export async function PATCH(
@@ -35,7 +52,7 @@ export async function PATCH(
   // Load current appointment (must belong to this clinic)
   const { data: apptRows, error: apptErr } = await ctx.supabaseAdmin
     .from("appointments")
-    .select("id,clinic_id,status,checked_in_at,no_show_excused")
+    .select("id, clinic_id, status, starts_at, checked_in_at, no_show_excused, cancelled_at")
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId)
     .limit(1);
@@ -48,8 +65,8 @@ export async function PATCH(
   const currentStatus = normalizeStatus(current.status) ?? "scheduled";
   const hasCheckedIn = Boolean(current.checked_in_at);
 
-  // Terminal rule: canceled is terminal
-  if (currentStatus === "canceled") {
+  // Terminal rule: canceled and late_cancel are terminal
+  if (currentStatus === "canceled" || currentStatus === "late_cancel") {
     return NextResponse.json(
       { error: "Canceled appointments cannot be modified." },
       { status: 400 }
@@ -106,9 +123,56 @@ export async function PATCH(
     );
   }
 
+  // Implement late cancel when client requests "canceled"
+  let statusToSave: Status = nextStatus;
+  const patch: Record<string, any> = {};
+
+  if (nextStatus === "canceled") {
+    const now = new Date();
+    patch.cancelled_at = now.toISOString();
+
+    // Load clinic setting late_cancel_window_minutes
+    const { data: settingsRow, error: settingsErr } = await ctx.supabaseAdmin
+      .from("clinic_settings")
+      .select("late_cancel_window_minutes")
+      .eq("clinic_id", ctx.clinicId)
+      .maybeSingle();
+
+    if (settingsErr) {
+      return NextResponse.json(
+        { error: `Failed to read clinic settings: ${settingsErr.message}` },
+        { status: 500 }
+      );
+    }
+
+    const windowMinsRaw = Number(settingsRow?.late_cancel_window_minutes ?? 60);
+    const windowMins = Number.isFinite(windowMinsRaw)
+      ? Math.max(0, Math.min(10080, Math.floor(windowMinsRaw)))
+      : 60;
+
+    // starts_at is stored as UTC-ish string; Date() can parse ISO and "YYYY-MM-DDTHH:mm:ss"
+    const start = new Date(String(current.starts_at));
+    const startValid = !Number.isNaN(start.getTime());
+
+    if (startValid && windowMins > 0) {
+      const minsUntil = minutesUntil(start, now);
+
+      // late cancel only makes sense if appointment is still in the future
+      if (minsUntil >= 0 && minsUntil <= windowMins) {
+        statusToSave = "late_cancel";
+      } else {
+        statusToSave = "canceled";
+      }
+    } else {
+      statusToSave = "canceled";
+    }
+  }
+
+  patch.status = statusToSave;
+
   const { data: updated, error: updErr } = await ctx.supabaseAdmin
     .from("appointments")
-    .update({ status: nextStatus })
+    .update(patch)
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId)
     .select("*")
