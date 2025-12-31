@@ -33,7 +33,7 @@ export async function PATCH(
   const action = String(body.action ?? "").trim(); // "check_in" | "" (default set_status)
 
   // Load current appointment (must belong to this clinic)
-  const { data: appt, error: apptErr } = await ctx.supabaseAdmin
+  const { data: apptRows, error: apptErr } = await ctx.supabaseAdmin
     .from("appointments")
     .select("id,clinic_id,status,checked_in_at,no_show_excused")
     .eq("id", appointmentId)
@@ -42,7 +42,7 @@ export async function PATCH(
 
   if (apptErr) return NextResponse.json({ error: apptErr.message }, { status: 500 });
 
-  const current = appt?.[0];
+  const current = apptRows?.[0];
   if (!current) return NextResponse.json({ error: "Appointment not found" }, { status: 404 });
 
   const currentStatus = normalizeStatus(current.status) ?? "scheduled";
@@ -58,18 +58,20 @@ export async function PATCH(
 
   // Check-in
   if (action === "check_in") {
-    const { error: updErr } = await ctx.supabaseAdmin
+    const { data: updated, error: updErr } = await ctx.supabaseAdmin
       .from("appointments")
       .update({
         checked_in_at: new Date().toISOString(),
         status: "checked_in",
       })
       .eq("id", appointmentId)
-      .eq("clinic_id", ctx.clinicId);
+      .eq("clinic_id", ctx.clinicId)
+      .select("*")
+      .maybeSingle();
 
     if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
 
-    return NextResponse.json({ ok: true }, { status: 200 });
+    return NextResponse.json({ ok: true, appointment: updated }, { status: 200 });
   }
 
   // Default: set_status
@@ -104,13 +106,15 @@ export async function PATCH(
     );
   }
 
-  const { error: updErr } = await ctx.supabaseAdmin
+  const { data: updated, error: updErr } = await ctx.supabaseAdmin
     .from("appointments")
     .update({ status: nextStatus })
     .eq("id", appointmentId)
-    .eq("clinic_id", ctx.clinicId);
+    .eq("clinic_id", ctx.clinicId)
+    .select("*")
+    .maybeSingle();
 
   if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
 
-  return NextResponse.json({ ok: true }, { status: 200 });
+  return NextResponse.json({ ok: true, appointment: updated }, { status: 200 });
 }
