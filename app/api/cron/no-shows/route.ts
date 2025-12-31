@@ -124,10 +124,7 @@ export async function GET(req: Request) {
 
       // Your DB column starts_at is timestamp without time zone.
       // You’ve been inserting "UTC without Z", so keep the cron consistent with that for now.
-      const thresholdIso = threshold
-        .toISOString()
-        .replace(".000Z", "")
-        .replace("Z", "");
+      const thresholdIso = threshold.toISOString();
 
       // ---- candidates ----
       const { data: candidates, error: candError } = await supabase
