@@ -22,18 +22,18 @@ function isAuthorized(req: Request) {
   );
 }
 
-function clampInt(n: unknown, min: number, max: number, fallback: number) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(x)));
-}
-
 function supabaseHost(url: string) {
   try {
     return new URL(url).host;
   } catch {
     return url;
   }
+}
+
+function clampInt(n: unknown, min: number, max: number, fallback: number) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(x)));
 }
 
 export async function GET(req: Request) {
@@ -44,30 +44,25 @@ export async function GET(req: Request) {
 
     const now = new Date();
 
-    // ---------- PREFLIGHT: confirm schema on the SAME DB Vercel is using ----------
-    const { data: colRows, error: colErr } = await supabase
-      .from("information_schema.columns")
-      .select("column_name,data_type,is_nullable,column_default")
-      .eq("table_schema", "public")
-      .eq("table_name", "appointments")
-      .order("ordinal_position", { ascending: true });
+    // ---------- PREFLIGHT via RPC ----------
+    const { data: schemaInfo, error: schemaErr } = await supabase.rpc(
+      "debug_appointments_schema"
+    );
 
-    if (colErr) {
+    if (schemaErr) {
       return NextResponse.json(
         {
-          step: "preflight-columns-error",
-          error: colErr.message,
+          step: "preflight-rpc-error",
+          error: schemaErr.message,
           supabaseHost: supabaseHost(supabaseUrl),
-          hint:
-            "If this fails, your DB user may not have access to information_schema through PostgREST. We can switch to an RPC if needed.",
+          fix:
+            "Run the SQL to create public.debug_appointments_schema() in this Supabase project.",
         },
         { status: 500 }
       );
     }
 
-    const columns = (colRows ?? []).map((r: any) => r.column_name);
-    const hasNoShowExcused = columns.includes("no_show_excused");
-
+    const hasNoShowExcused = Boolean((schemaInfo as any)?.has_no_show_excused);
     if (!hasNoShowExcused) {
       return NextResponse.json(
         {
@@ -75,9 +70,9 @@ export async function GET(req: Request) {
           error:
             "public.appointments.no_show_excused is missing in the DB this deployment is using.",
           supabaseHost: supabaseHost(supabaseUrl),
-          columnsSample: columns,
+          schemaInfo,
           fix:
-            "Run the ALTER TABLE in the Supabase project that matches this supabaseHost. If your Supabase dashboard shows the column but this says missing, your Vercel env SUPABASE_URL points to a different project.",
+            "Run ALTER TABLE on the Supabase project that matches this supabaseHost (Vercel env may point to a different project).",
         },
         { status: 500 }
       );
@@ -101,11 +96,10 @@ export async function GET(req: Request) {
     const updatedIds: string[] = [];
     const perClinic: any[] = [];
 
-    // 2) per clinic
     for (const c of clinics ?? []) {
       const clinicId = c.id as string;
 
-      // ---- settings (robust, no .single()) ----
+      // ---- settings ----
       let graceMinutes = 10;
       let settingsStatus: "ok" | "missing" | "error" = "ok";
       let settingsErrorMsg: string | null = null;
@@ -128,13 +122,14 @@ export async function GET(req: Request) {
 
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
 
-      // Keep your DB comparison style for now (since your starts_at is timestamp without time zone)
+      // Your DB column starts_at is timestamp without time zone.
+      // You’ve been inserting "UTC without Z", so keep the cron consistent with that for now.
       const thresholdIso = threshold
         .toISOString()
         .replace(".000Z", "")
         .replace("Z", "");
 
-      // ---- candidates query ----
+      // ---- candidates ----
       const { data: candidates, error: candError } = await supabase
         .from("appointments")
         .select("id")
@@ -152,6 +147,8 @@ export async function GET(req: Request) {
           candidateCount: 0,
           updatedCount: 0,
           error: candError.message,
+          settingsStatus,
+          settingsErrorMsg,
         });
         continue;
       }
@@ -175,6 +172,8 @@ export async function GET(req: Request) {
             candidateCount,
             updatedCount: 0,
             error: updError.message,
+            settingsStatus,
+            settingsErrorMsg,
           });
           continue;
         }
@@ -191,6 +190,8 @@ export async function GET(req: Request) {
         clinicId,
         candidateCount,
         updatedCount: clinicUpdatedCount,
+        settingsStatus,
+        settingsErrorMsg,
       });
     }
 
