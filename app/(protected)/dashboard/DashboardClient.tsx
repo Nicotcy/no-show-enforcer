@@ -12,6 +12,8 @@ type Appointment = {
   checked_in_at: string | null;
   no_show_excused: boolean | null;
   no_show_fee_charged: boolean | null;
+  no_show_excuse_reason?: string | null;
+  cancelled_at?: string | null;
 };
 
 function toLocalDisplay(isoOrTs: string) {
@@ -39,7 +41,21 @@ export default function DashboardClient() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
+  const [pendingById, setPendingById] = useState<Record<string, boolean>>({});
+
   const dateInputRef = useRef<HTMLInputElement | null>(null);
+
+  function setPending(id: string, pending: boolean) {
+    setPendingById((prev) => ({ ...prev, [id]: pending }));
+  }
+
+  function patchAppointmentInState(updated: Appointment | null | undefined) {
+    if (!updated?.id) return;
+
+    setAppointments((prev) =>
+      prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a))
+    );
+  }
 
   async function loadAppointments() {
     setLoading(true);
@@ -128,6 +144,7 @@ export default function DashboardClient() {
       setStartsAtLocal("");
       setInfo("Appointment created.");
 
+      // Keep this: creation depends on server normalization; safest to reload list.
       await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to create appointment");
@@ -137,11 +154,17 @@ export default function DashboardClient() {
   async function updateStatus(id: string, status: AllowedStatus) {
     setError(null);
     setInfo(null);
+    setPending(id, true);
+
     try {
+      const isCheckIn = status === "checked_in";
+
       const res = await fetch(`/api/appointments/${id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify(
+          isCheckIn ? { action: "check_in" } : { status }
+        ),
       });
 
       const json = await res.json().catch(() => ({}));
@@ -150,16 +173,22 @@ export default function DashboardClient() {
         return;
       }
 
+      // Update only the row, no full reload
+      patchAppointmentInState(json?.appointment ?? null);
+
       setInfo("Updated.");
-      await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to update");
+    } finally {
+      setPending(id, false);
     }
   }
 
   async function excuseNoShow(id: string) {
     setError(null);
     setInfo(null);
+    setPending(id, true);
+
     try {
       const reason = prompt("Reason (optional):") || null;
 
@@ -175,17 +204,19 @@ export default function DashboardClient() {
         return;
       }
 
+      patchAppointmentInState(json?.appointment ?? null);
+
       setInfo("No-show excused.");
-      await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to excuse");
+    } finally {
+      setPending(id, false);
     }
   }
 
   function openDatePicker() {
     const el = dateInputRef.current;
     if (!el) return;
-    // Chromium supports showPicker(); fallback to focus.
     const anyEl: any = el as any;
     if (typeof anyEl.showPicker === "function") anyEl.showPicker();
     else el.focus();
@@ -258,28 +289,54 @@ export default function DashboardClient() {
           <tbody>
             {sortedAppointments.map((a) => {
               const checkedIn = a.checked_in_at ? "Yes" : "No";
+              const isPending = Boolean(pendingById[a.id]);
+
+              const statusLabel =
+                a.status === "no_show" && a.no_show_excused
+                  ? "no_show (excused)"
+                  : String(a.status);
+
               return (
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
                   <td style={{ padding: 10 }}>{a.patient_name}</td>
                   <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
                   <td style={{ padding: 10 }}>
-  {a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : a.status}
-</td>
+                    {statusLabel}
+                    {isPending && <span style={{ marginLeft: 8, opacity: 0.7 }}>Saving…</span>}
+                  </td>
                   <td style={{ padding: 10 }}>{checkedIn}</td>
                   <td style={{ padding: 10, whiteSpace: "nowrap" }}>
-                    <button onClick={() => updateStatus(a.id, "checked_in")} style={{ marginRight: 8 }}>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "checked_in")}
+                      style={{ marginRight: 8 }}
+                    >
                       Check-in
                     </button>
-                    <button onClick={() => updateStatus(a.id, "late")} style={{ marginRight: 8 }}>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "late")}
+                      style={{ marginRight: 8 }}
+                    >
                       Mark late
                     </button>
-                    <button onClick={() => updateStatus(a.id, "no_show")} style={{ marginRight: 8 }}>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "no_show")}
+                      style={{ marginRight: 8 }}
+                    >
                       Mark no-show
                     </button>
-                    <button onClick={() => updateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
+                    <button
+                      disabled={isPending}
+                      onClick={() => updateStatus(a.id, "canceled")}
+                      style={{ marginRight: 8 }}
+                    >
                       Cancel
                     </button>
-                    <button onClick={() => excuseNoShow(a.id)}>Excuse</button>
+                    <button disabled={isPending} onClick={() => excuseNoShow(a.id)}>
+                      Excuse
+                    </button>
                   </td>
                 </tr>
               );
