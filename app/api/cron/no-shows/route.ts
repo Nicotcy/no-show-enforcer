@@ -134,7 +134,6 @@ export async function GET(req: Request) {
         .eq("status", "scheduled")
         .is("checked_in_at", null)
         .lte("starts_at", thresholdIso)
-        .is("canceled_at", null)
         .is("cancelled_at", null)
         .or("no_show_excused.is.null,no_show_excused.eq.false");
 
