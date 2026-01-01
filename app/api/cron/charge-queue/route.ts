@@ -99,6 +99,8 @@ export async function GET(req: Request) {
           candidateCount: 0,
           eligibleCount: 0,
           queuedCount: 0,
+          queuedIds: [],
+          lockedRows: [],
           supabaseProjectRef,
           supabaseUrlUsed: supabaseUrl,
         },
@@ -106,7 +108,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // 2) seguridad extra: settings actuales
+    // 2) seguridad extra: settings actuales por clínica
     const { data: settingsRows, error: settingsError } = await supabase
       .from("clinic_settings")
       .select("clinic_id, auto_charge_enabled, no_show_fee_cents")
@@ -150,7 +152,9 @@ export async function GET(req: Request) {
           candidateCount: candidateIds.length,
           eligibleCount: 0,
           queuedCount: 0,
-          note: "No eligible rows after checking clinic_settings.",
+          queuedIds: [],
+          lockedRows: [],
+          note: "No eligible rows after checking clinic_settings (auto_charge_enabled / fee).",
           supabaseProjectRef,
           supabaseUrlUsed: supabaseUrl,
         },
@@ -158,7 +162,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // 3) lock
+    // 3) lock: actualizamos columnas nuevas y DEVOLVEMOS los valores escritos
     const { data: locked, error: lockError } = await supabase
       .from("appointments")
       .update({
@@ -166,7 +170,7 @@ export async function GET(req: Request) {
         no_show_fee_last_attempt_at: nowIso,
       })
       .in("id", eligibleIds)
-      .select("id");
+      .select("id, clinic_id, no_show_fee_processing_at, no_show_fee_last_attempt_at");
 
     if (lockError) {
       return NextResponse.json(
@@ -181,6 +185,12 @@ export async function GET(req: Request) {
     }
 
     const lockedIds = (locked ?? []).map((x: any) => String(x.id));
+    const lockedRows = (locked ?? []).map((x: any) => ({
+      id: String(x.id),
+      clinic_id: String(x.clinic_id),
+      no_show_fee_processing_at: x.no_show_fee_processing_at ?? null,
+      no_show_fee_last_attempt_at: x.no_show_fee_last_attempt_at ?? null,
+    }));
 
     return NextResponse.json(
       {
@@ -190,6 +200,7 @@ export async function GET(req: Request) {
         eligibleCount: eligibleIds.length,
         queuedCount: lockedIds.length,
         queuedIds: lockedIds,
+        lockedRows,
         supabaseProjectRef,
         supabaseUrlUsed: supabaseUrl,
       },
