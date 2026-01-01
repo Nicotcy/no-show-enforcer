@@ -12,6 +12,7 @@ type Appointment = {
   checked_in_at: string | null;
   no_show_excused: boolean | null;
   no_show_fee_charged: boolean | null;
+  no_show_fee_pending: boolean | null;
 };
 
 function toLocalDisplay(isoOrTs: string) {
@@ -58,7 +59,6 @@ export default function DashboardClient() {
         return;
       }
 
-      // soporta ambos formatos: array directo o { appointments: [...] }
       const list: Appointment[] = Array.isArray(json)
         ? json
         : Array.isArray(json?.appointments)
@@ -137,7 +137,6 @@ export default function DashboardClient() {
   }
 
   async function checkIn(id: string) {
-    // check-in “real”: además de poner status, guarda checked_in_at (hora)
     setError(null);
     setInfo(null);
     try {
@@ -263,7 +262,10 @@ export default function DashboardClient() {
                 a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : String(a.status);
 
               const checkInLabel = a.checked_in_at ? toLocalDisplay(a.checked_in_at) : "-";
-              const feeLabel = a.no_show_fee_charged ? "Charged" : "-";
+
+              let feeLabel = "-";
+              if (a.no_show_fee_charged) feeLabel = "Charged";
+              else if (a.no_show_fee_pending) feeLabel = "Pending";
 
               return (
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
