@@ -22,6 +22,7 @@ function isAuthorized(req: Request) {
 }
 
 const BATCH_SIZE = 100;
+const LOCK_TIMEOUT_MINUTES = 15;
 
 export async function GET(req: Request) {
   try {
@@ -29,9 +30,14 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const nowIso = new Date().toISOString();
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const lockTimeoutIso = new Date(
+      now.getTime() - LOCK_TIMEOUT_MINUTES * 60 * 1000
+    ).toISOString();
 
-    // 1) Candidatos: pendientes de cobro, no charged, no excused, sin lock
+    // 1) Candidatos: pendientes de cobro, no charged, no excused,
+    //    y SIN lock o con lock expirado (para evitar colgados).
     const { data: candidates, error: candError } = await supabase
       .from("appointments")
       .select("id, clinic_id")
@@ -39,7 +45,9 @@ export async function GET(req: Request) {
       .eq("no_show_fee_charged", false)
       .eq("status", "no_show")
       .or("no_show_excused.is.null,no_show_excused.eq.false")
-      .is("no_show_fee_processing_at", null)
+      .or(
+        `no_show_fee_processing_at.is.null,no_show_fee_processing_at.lt.${lockTimeoutIso}`
+      )
       .limit(BATCH_SIZE);
 
     if (candError) {
@@ -98,7 +106,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // 3) Lock: reservar para cobro
+    // 3) Lock: reservar para cobro (también “re-lockea” los expirados)
     const { error: lockError } = await supabase
       .from("appointments")
       .update({
@@ -119,6 +127,8 @@ export async function GET(req: Request) {
       updated_count: eligibleIds.length,
       details: {
         at: nowIso,
+        lockTimeoutMinutes: LOCK_TIMEOUT_MINUTES,
+        lockTimeoutIso,
         queuedCount: eligibleIds.length,
         queuedIds: eligibleIds,
       },
