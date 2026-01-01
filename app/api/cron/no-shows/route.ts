@@ -80,8 +80,9 @@ export async function GET(req: Request) {
       }
 
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
-      // UTC "sin Z" para comparar con timestamp without time zone
-      const thresholdIso = threshold.toISOString().replace(".000Z", "").replace("Z", "");
+      // Mantener ISO completo con Z (timestamptz) para que Supabase compare bien
+      const thresholdIso = threshold.toISOString();
+
 
       // ---- candidates query ----
       const { data: candidates, error: candError } = await supabase
