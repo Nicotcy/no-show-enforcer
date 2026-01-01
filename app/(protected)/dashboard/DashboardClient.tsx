@@ -14,105 +14,93 @@ type Appointment = {
   no_show_fee_charged: boolean | null;
 };
 
-function isoToDatetimeLocal(iso: string) {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}`;
-}
-
-function datetimeLocalToDb(value: string) {
-  // El input datetime-local no tiene timezone; lo interpretamos como local del navegador
-  // y lo convertimos a ISO para DB.
-  const d = new Date(value);
-  return d.toISOString();
+function toLocalDisplay(isoOrTs: string) {
+  try {
+    const d = new Date(isoOrTs);
+    if (Number.isNaN(d.getTime())) return isoOrTs;
+    return d.toLocaleString();
+  } catch {
+    return isoOrTs;
+  }
 }
 
 export default function DashboardClient() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [loading, setLoading] = useState(false);
+
   const [patientName, setPatientName] = useState("");
   const [startsAtLocal, setStartsAtLocal] = useState("");
-
-  const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
   const dateInputRef = useRef<HTMLInputElement | null>(null);
 
+  function openDatePicker() {
+    const el = dateInputRef.current;
+    if (!el) return;
+
+    const anyEl = el as any;
+    if (typeof anyEl.showPicker === "function") anyEl.showPicker();
+    else el.focus();
+  }
+
   async function loadAppointments() {
     setLoading(true);
     setError(null);
-    setInfo(null);
     try {
       const res = await fetch("/api/appointments", { cache: "no-store" });
       const json = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setError(json?.error || `Failed to load appointments (${res.status})`);
         setAppointments([]);
+        setError(json?.error || `Failed to load appointments (${res.status})`);
         return;
       }
 
+      // soporta ambos formatos: array directo o { appointments: [...] }
       const list: Appointment[] = Array.isArray(json)
         ? json
         : Array.isArray(json?.appointments)
-        ? json.appointments
-        : [];
+          ? json.appointments
+          : [];
 
       setAppointments(list);
     } catch (e: any) {
-      setError(e?.message || "Failed to load appointments");
       setAppointments([]);
+      setError(e?.message || "Failed to load appointments");
     } finally {
       setLoading(false);
     }
   }
-
-  useEffect(() => {
-    loadAppointments();
-  }, []);
 
   async function addAppointment() {
     setError(null);
     setInfo(null);
 
     const name = patientName.trim();
-    const starts = startsAtLocal.trim();
-
     if (!name) {
       setError("Patient name is required.");
       return;
     }
-    if (!starts) {
+    if (!startsAtLocal) {
       setError("Start time is required.");
       return;
     }
 
-    setCreating(true);
     try {
+      const startsAtIso = new Date(startsAtLocal).toISOString();
+
       const res = await fetch("/api/appointments", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          patient_name: name,
-          starts_at: datetimeLocalToDb(starts),
-        }),
+        body: JSON.stringify({ patient_name: name, starts_at: startsAtIso }),
       });
 
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(json?.error || `Failed to create (${res.status})`);
+        setError(json?.error || `Failed to add (${res.status})`);
         return;
-      }
-
-      const created: Appointment | null =
-        json?.appointment ?? (json?.id ? json : null);
-
-      if (created) {
-        setAppointments((prev) => [created, ...prev]);
       }
 
       setPatientName("");
@@ -121,19 +109,13 @@ export default function DashboardClient() {
 
       await loadAppointments();
     } catch (e: any) {
-      setError(e?.message || "Failed to create appointment");
-    } finally {
-      setCreating(false);
+      setError(e?.message || "Failed to add");
     }
   }
 
   async function updateStatus(id: string, status: AllowedStatus) {
     setError(null);
     setInfo(null);
-
-    // optimista tras éxito: el dashboard refleja el cambio sin refresh manual
-    const nowIso = new Date().toISOString();
-
     try {
       const res = await fetch(`/api/appointments/${id}`, {
         method: "PATCH",
@@ -147,34 +129,43 @@ export default function DashboardClient() {
         return;
       }
 
-      // actualización inmediata en memoria
-      setAppointments((prev) =>
-        prev.map((a) => {
-          if (a.id !== id) return a;
-          return {
-            ...a,
-            status,
-            checked_in_at: status === "checked_in" ? nowIso : a.checked_in_at,
-          };
-        })
-      );
-
       setInfo("Updated.");
-
-      // red de seguridad: re-sincroniza por si cambian más campos server-side
       await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to update");
     }
   }
 
+  async function checkIn(id: string) {
+    // check-in “real”: además de poner status, guarda checked_in_at (hora)
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await fetch(`/api/appointments/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "check_in" }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(json?.error || `Failed to check-in (${res.status})`);
+        return;
+      }
+
+      setInfo("Checked in.");
+      await loadAppointments();
+    } catch (e: any) {
+      setError(e?.message || "Failed to check-in");
+    }
+  }
+
   async function excuseNoShow(id: string) {
     setError(null);
     setInfo(null);
-
-    const reason = window.prompt("Reason (optional):")?.trim() ?? "";
-
     try {
+      const reason = prompt("Reason (optional):") || null;
+
       const res = await fetch(`/api/appointments/${id}/excuse`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -187,20 +178,16 @@ export default function DashboardClient() {
         return;
       }
 
-      // update inmediato (sin esperar refresh)
-      setAppointments((prev) =>
-        prev.map((a) => {
-          if (a.id !== id) return a;
-          return { ...a, no_show_excused: true };
-        })
-      );
-
       setInfo("No-show excused.");
       await loadAppointments();
     } catch (e: any) {
-      setError(e?.message || "Failed to excuse no-show");
+      setError(e?.message || "Failed to excuse");
     }
   }
+
+  useEffect(() => {
+    loadAppointments();
+  }, []);
 
   const sortedAppointments = useMemo(() => {
     const copy = [...appointments];
@@ -214,132 +201,88 @@ export default function DashboardClient() {
 
   return (
     <div style={{ padding: 24 }}>
-      <h1 style={{ fontSize: 20, marginBottom: 16 }}>Dashboard</h1>
+      <h2 style={{ fontSize: 28, marginBottom: 20 }}>Dashboard</h2>
 
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            placeholder="Patient name"
-            value={patientName}
-            onChange={(e) => setPatientName(e.target.value)}
-            style={{ padding: 8, minWidth: 220 }}
-          />
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
+        <input
+          placeholder="Patient name"
+          value={patientName}
+          onChange={(e) => setPatientName(e.target.value)}
+          style={{ padding: 10, minWidth: 240 }}
+        />
 
-          <input
-            ref={dateInputRef}
-            type="datetime-local"
-            value={startsAtLocal}
-            onChange={(e) => setStartsAtLocal(e.target.value)}
-            style={{ padding: 8 }}
-          />
+        <input
+          ref={dateInputRef}
+          type="datetime-local"
+          value={startsAtLocal}
+          onChange={(e) => setStartsAtLocal(e.target.value)}
+          style={{ padding: 10, border: "1px solid #333" }}
+        />
 
-          <button
-            type="button"
-            onClick={() => dateInputRef.current?.showPicker?.()}
-            style={{ padding: "8px 10px" }}
-          >
-            Pick date
-          </button>
+        <button
+          type="button"
+          onClick={openDatePicker}
+          style={{ padding: "10px 12px", border: "1px solid #333" }}
+          title="Pick date"
+        >
+          📅 Pick date
+        </button>
 
-          <button
-            onClick={addAppointment}
-            disabled={creating}
-            style={{ padding: "8px 12px" }}
-          >
-            {creating ? "Creating..." : "Create"}
-          </button>
+        <button onClick={addAppointment} style={{ padding: "10px 14px" }}>
+          Add
+        </button>
 
-          <button
-            onClick={loadAppointments}
-            disabled={loading}
-            style={{ padding: "8px 12px" }}
-          >
-            {loading ? "Loading..." : "Refresh"}
-          </button>
-        </div>
+        <button
+          onClick={loadAppointments}
+          disabled={loading}
+          style={{ padding: "10px 14px" }}
+          title="Reload appointments list"
+        >
+          {loading ? "Loading..." : "Refresh"}
+        </button>
       </div>
 
-      {error && (
-        <div style={{ marginBottom: 12, color: "crimson" }}>{error}</div>
-      )}
-      {info && <div style={{ marginBottom: 12, color: "green" }}>{info}</div>}
+      {error && <div style={{ color: "#ff6b6b", marginBottom: 12 }}>{error}</div>}
+      {info && <div style={{ color: "#7ee787", marginBottom: 12 }}>{info}</div>}
 
       <div style={{ overflowX: "auto" }}>
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            border: "1px solid #ddd",
-          }}
-        >
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
           <thead>
-            <tr>
-              <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #ddd" }}>
-                Patient
-              </th>
-              <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #ddd" }}>
-                Starts at
-              </th>
-              <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #ddd" }}>
-                Status
-              </th>
-              <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #ddd" }}>
-                Flags
-              </th>
-              <th style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #ddd" }}>
-                Actions
-              </th>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
+              <th style={{ padding: 10 }}>Patient</th>
+              <th style={{ padding: 10 }}>Starts at</th>
+              <th style={{ padding: 10 }}>Status</th>
+              <th style={{ padding: 10 }}>Check-in time</th>
+              <th style={{ padding: 10 }}>Fee</th>
+              <th style={{ padding: 10 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {sortedAppointments.map((a) => {
-              const startsLocal = isoToDatetimeLocal(a.starts_at);
               const statusLabel =
-                a.status === "no_show" && a.no_show_excused
-                  ? "no_show (excused)"
-                  : String(a.status);
+                a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : String(a.status);
 
-              const flags: string[] = [];
-              if (a.no_show_fee_charged) flags.push("fee charged");
-              if (a.checked_in_at) flags.push("checked_in_at");
+              const checkInLabel = a.checked_in_at ? toLocalDisplay(a.checked_in_at) : "-";
+              const feeLabel = a.no_show_fee_charged ? "Charged" : "-";
 
               return (
-                <tr key={a.id}>
-                  <td style={{ padding: 10, borderBottom: "1px solid #eee" }}>
-                    {a.patient_name}
-                  </td>
-                  <td style={{ padding: 10, borderBottom: "1px solid #eee", whiteSpace: "nowrap" }}>
-                    {startsLocal}
-                  </td>
-                  <td style={{ padding: 10, borderBottom: "1px solid #eee" }}>
-                    {statusLabel}
-                  </td>
-                  <td style={{ padding: 10, borderBottom: "1px solid #eee", opacity: 0.85 }}>
-                    {flags.length ? flags.join(", ") : "-"}
-                  </td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap", borderBottom: "1px solid #eee" }}>
-                    <button
-                      onClick={() => updateStatus(a.id, "checked_in")}
-                      style={{ marginRight: 8 }}
-                    >
+                <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
+                  <td style={{ padding: 10 }}>{a.patient_name}</td>
+                  <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
+                  <td style={{ padding: 10 }}>{statusLabel}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{checkInLabel}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{feeLabel}</td>
+                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>
+                    <button onClick={() => checkIn(a.id)} style={{ marginRight: 8 }}>
                       Check-in
                     </button>
-                    <button
-                      onClick={() => updateStatus(a.id, "late")}
-                      style={{ marginRight: 8 }}
-                    >
+                    <button onClick={() => updateStatus(a.id, "late")} style={{ marginRight: 8 }}>
                       Mark late
                     </button>
-                    <button
-                      onClick={() => updateStatus(a.id, "no_show")}
-                      style={{ marginRight: 8 }}
-                    >
+                    <button onClick={() => updateStatus(a.id, "no_show")} style={{ marginRight: 8 }}>
                       Mark no-show
                     </button>
-                    <button
-                      onClick={() => updateStatus(a.id, "canceled")}
-                      style={{ marginRight: 8 }}
-                    >
+                    <button onClick={() => updateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
                       Cancel
                     </button>
                     <button onClick={() => excuseNoShow(a.id)}>Excuse</button>
@@ -350,7 +293,7 @@ export default function DashboardClient() {
 
             {sortedAppointments.length === 0 && !loading && (
               <tr>
-                <td style={{ padding: 10, opacity: 0.7 }} colSpan={5}>
+                <td style={{ padding: 10, opacity: 0.7 }} colSpan={6}>
                   No appointments yet.
                 </td>
               </tr>
