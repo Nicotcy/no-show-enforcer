@@ -25,6 +25,62 @@ function toLocalDisplay(isoOrTs: string) {
   }
 }
 
+function isPast(startsAtIso: string) {
+  const t = new Date(startsAtIso).getTime();
+  if (Number.isNaN(t)) return false;
+  return t < Date.now();
+}
+
+function FeeLabel(a: Appointment) {
+  if (a.no_show_fee_charged) return "Charged";
+  if (a.no_show_fee_pending) return "Pending";
+  return "-";
+}
+
+function StatusLabel(a: Appointment) {
+  if (a.status === "no_show" && a.no_show_excused) return "no_show (excused)";
+  return String(a.status);
+}
+
+function AppointmentRow({
+  a,
+  onCheckIn,
+  onUpdateStatus,
+  onExcuse,
+}: {
+  a: Appointment;
+  onCheckIn: (id: string) => void;
+  onUpdateStatus: (id: string, status: AllowedStatus) => void;
+  onExcuse: (id: string) => void;
+}) {
+  return (
+    <tr style={{ borderBottom: "1px solid #222" }}>
+      <td style={{ padding: 10 }}>{a.patient_name}</td>
+      <td style={{ padding: 10, whiteSpace: "nowrap" }}>{toLocalDisplay(a.starts_at)}</td>
+      <td style={{ padding: 10 }}>{StatusLabel(a)}</td>
+      <td style={{ padding: 10, whiteSpace: "nowrap" }}>
+        {a.checked_in_at ? toLocalDisplay(a.checked_in_at) : "-"}
+      </td>
+      <td style={{ padding: 10, whiteSpace: "nowrap" }}>{FeeLabel(a)}</td>
+      <td style={{ padding: 10, whiteSpace: "nowrap" }}>
+        <button onClick={() => onCheckIn(a.id)} style={{ marginRight: 8 }}>
+          Check-in
+        </button>
+        <button onClick={() => onUpdateStatus(a.id, "late")} style={{ marginRight: 8 }}>
+          Mark late
+        </button>
+        <button onClick={() => onUpdateStatus(a.id, "no_show")} style={{ marginRight: 8 }}>
+          Mark no-show
+        </button>
+        <button onClick={() => onUpdateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
+          Cancel
+        </button>
+        <button onClick={() => onExcuse(a.id)}>Excuse</button>
+      </td>
+    </tr>
+  );
+}
+
 export default function DashboardClient() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(false);
@@ -78,7 +134,6 @@ export default function DashboardClient() {
   }
 
   async function addAppointment() {
-    // anti-spam: bloqueo síncrono (evita doble click en el mismo tick)
     if (creatingLockRef.current) return;
     creatingLockRef.current = true;
 
@@ -200,7 +255,6 @@ export default function DashboardClient() {
   useEffect(() => {
     loadAppointments();
 
-    // auto-refresh suave para cambios del cron sin tocar Refresh
     const id = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         loadAppointments();
@@ -210,15 +264,35 @@ export default function DashboardClient() {
     return () => window.clearInterval(id);
   }, []);
 
-  const sortedAppointments = useMemo(() => {
-    const copy = [...appointments];
-    copy.sort((a, b) => {
-      const ta = new Date(a.starts_at).getTime();
-      const tb = new Date(b.starts_at).getTime();
-      return tb - ta;
-    });
-    return copy;
+  const { upcoming, past } = useMemo(() => {
+    const up: Appointment[] = [];
+    const pa: Appointment[] = [];
+
+    for (const a of appointments) {
+      if (isPast(a.starts_at)) pa.push(a);
+      else up.push(a);
+    }
+
+    // Upcoming: lo más cercano primero
+    up.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+    // Past: lo más reciente primero
+    pa.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime());
+
+    return { upcoming: up, past: pa };
   }, [appointments]);
+
+  const tableHeader = (
+    <thead>
+      <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
+        <th style={{ padding: 10 }}>Patient</th>
+        <th style={{ padding: 10 }}>Starts at</th>
+        <th style={{ padding: 10 }}>Status</th>
+        <th style={{ padding: 10 }}>Check-in time</th>
+        <th style={{ padding: 10 }}>Fee</th>
+        <th style={{ padding: 10 }}>Actions</th>
+      </tr>
+    </thead>
+  );
 
   return (
     <div style={{ padding: 24 }}>
@@ -269,59 +343,53 @@ export default function DashboardClient() {
       {error && <div style={{ color: "#ff6b6b", marginBottom: 12 }}>{error}</div>}
       {info && <div style={{ color: "#7ee787", marginBottom: 12 }}>{info}</div>}
 
-      <div style={{ overflowX: "auto" }}>
+      <div style={{ marginBottom: 10, opacity: 0.9 }}>
+        Upcoming ({upcoming.length}) · Past ({past.length})
+      </div>
+
+      <div style={{ marginBottom: 18, overflowX: "auto" }}>
+        <div style={{ fontSize: 18, margin: "10px 0" }}>Upcoming</div>
         <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
-              <th style={{ padding: 10 }}>Patient</th>
-              <th style={{ padding: 10 }}>Starts at</th>
-              <th style={{ padding: 10 }}>Status</th>
-              <th style={{ padding: 10 }}>Check-in time</th>
-              <th style={{ padding: 10 }}>Fee</th>
-              <th style={{ padding: 10 }}>Actions</th>
-            </tr>
-          </thead>
+          {tableHeader}
           <tbody>
-            {sortedAppointments.map((a) => {
-              const statusLabel =
-                a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : String(a.status);
-
-              const checkInLabel = a.checked_in_at ? toLocalDisplay(a.checked_in_at) : "-";
-
-              let feeLabel = "-";
-              if (a.no_show_fee_charged) feeLabel = "Charged";
-              else if (a.no_show_fee_pending) feeLabel = "Pending";
-
-              return (
-                <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
-                  <td style={{ padding: 10 }}>{a.patient_name}</td>
-                  <td style={{ padding: 10 }}>{toLocalDisplay(a.starts_at)}</td>
-                  <td style={{ padding: 10 }}>{statusLabel}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{checkInLabel}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>{feeLabel}</td>
-                  <td style={{ padding: 10, whiteSpace: "nowrap" }}>
-                    <button onClick={() => checkIn(a.id)} style={{ marginRight: 8 }}>
-                      Check-in
-                    </button>
-                    <button onClick={() => updateStatus(a.id, "late")} style={{ marginRight: 8 }}>
-                      Mark late
-                    </button>
-                    <button onClick={() => updateStatus(a.id, "no_show")} style={{ marginRight: 8 }}>
-                      Mark no-show
-                    </button>
-                    <button onClick={() => updateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
-                      Cancel
-                    </button>
-                    <button onClick={() => excuseNoShow(a.id)}>Excuse</button>
-                  </td>
-                </tr>
-              );
-            })}
-
-            {sortedAppointments.length === 0 && !loading && (
+            {upcoming.map((a) => (
+              <AppointmentRow
+                key={a.id}
+                a={a}
+                onCheckIn={checkIn}
+                onUpdateStatus={updateStatus}
+                onExcuse={excuseNoShow}
+              />
+            ))}
+            {upcoming.length === 0 && !loading && (
               <tr>
                 <td style={{ padding: 10, opacity: 0.7 }} colSpan={6}>
-                  No appointments yet.
+                  No upcoming appointments.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <div style={{ fontSize: 18, margin: "10px 0" }}>Past</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
+          {tableHeader}
+          <tbody>
+            {past.map((a) => (
+              <AppointmentRow
+                key={a.id}
+                a={a}
+                onCheckIn={checkIn}
+                onUpdateStatus={updateStatus}
+                onExcuse={excuseNoShow}
+              />
+            ))}
+            {past.length === 0 && !loading && (
+              <tr>
+                <td style={{ padding: 10, opacity: 0.7 }} colSpan={6}>
+                  No past appointments.
                 </td>
               </tr>
             )}
