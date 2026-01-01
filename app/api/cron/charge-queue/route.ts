@@ -48,7 +48,7 @@ export async function GET(req: Request) {
 
     if (!candidates || candidates.length === 0) {
       return NextResponse.json(
-        { ok: true, candidateCount: 0, queuedCount: 0 },
+        { ok: true, candidateCount: 0, queuedCount: 0, queuedIds: [] },
         { status: 200 }
       );
     }
@@ -88,7 +88,12 @@ export async function GET(req: Request) {
 
     if (eligibleIds.length === 0) {
       return NextResponse.json(
-        { ok: true, candidateCount: candidateIds.length, queuedCount: 0 },
+        {
+          ok: true,
+          candidateCount: candidateIds.length,
+          queuedCount: 0,
+          queuedIds: [],
+        },
         { status: 200 }
       );
     }
@@ -115,6 +120,7 @@ export async function GET(req: Request) {
       details: {
         at: nowIso,
         queuedCount: eligibleIds.length,
+        queuedIds: eligibleIds,
       },
     });
 
@@ -123,6 +129,7 @@ export async function GET(req: Request) {
         ok: true,
         candidateCount: candidateIds.length,
         queuedCount: eligibleIds.length,
+        queuedIds: eligibleIds,
       },
       { status: 200 }
     );
