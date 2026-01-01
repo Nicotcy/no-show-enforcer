@@ -86,15 +86,14 @@ export async function GET(req: Request) {
 
       // ---- candidates query ----
       const { data: candidates, error: candError } = await supabase
-        .from("appointments")
-        .select("id")
-        .eq("clinic_id", clinicId)
-        .eq("status", "scheduled")
-        .is("checked_in_at", null)
-        .lte("starts_at", thresholdIso)
-        .is("canceled_at", null)
-        .is("cancelled_at", null)
-        .or("no_show_excused.is.null,no_show_excused.eq.false");
+      .from("appointments")
+      .select("id")
+      .eq("clinic_id", clinicId)
+      .eq("status", "scheduled")
+      .is("checked_in_at", null)
+      .lte("starts_at", thresholdIso)
+      .or("no_show_excused.is.null,no_show_excused.eq.false");
+
 
       if (candError) {
         await supabase.from("cron_runs").insert({
