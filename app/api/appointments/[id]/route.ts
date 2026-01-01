@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getServerContext } from "@/lib/server/context";
 import {
   ALLOWED_STATUSES,
@@ -26,13 +26,13 @@ async function getClinicChargeRule(supabaseAdmin: any, clinicId: string) {
 }
 
 export async function PATCH(
-  req: Request,
-  { params }: { params: { id: string } }
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
 ): Promise<Response> {
   const ctx = await getServerContext(req);
-  if ("error" in ctx) return ctx.error as unknown as Response;
+  if ("error" in ctx) return ctx.error;
 
-  const appointmentId = params.id;
+  const { id: appointmentId } = await context.params;
 
   const body = await req.json().catch(() => ({}));
   const action = String(body?.action || "");
@@ -57,7 +57,6 @@ export async function PATCH(
   const currentStatus = normalizeStatus(appt.status);
   let nextStatus = currentStatus;
 
-  // Build update payload
   const updatePayload: Record<string, any> = {};
 
   if (action === "set_status") {
@@ -69,7 +68,6 @@ export async function PATCH(
 
     nextStatus = normalized;
 
-    // Validate transition rules (centralized)
     const transitionErr = validateStatusTransition(currentStatus, nextStatus);
     if (transitionErr) {
       return NextResponse.json({ error: transitionErr }, { status: 400 });
@@ -91,10 +89,8 @@ export async function PATCH(
 
     updatePayload.status = nextStatus;
 
-    // Side effects per status
     if (nextStatus === "checked_in") {
       updatePayload.checked_in_at = new Date().toISOString();
-      // Clean up any billing flags
       updatePayload.no_show_fee_pending = false;
       updatePayload.no_show_fee_charged = false;
       updatePayload.no_show_detected_at = null;
@@ -104,7 +100,6 @@ export async function PATCH(
 
     if (nextStatus === "canceled") {
       updatePayload.cancelled_at = new Date().toISOString();
-      // Clean up any billing flags
       updatePayload.no_show_fee_pending = false;
       updatePayload.no_show_fee_charged = false;
       updatePayload.no_show_detected_at = null;
@@ -117,7 +112,6 @@ export async function PATCH(
       updatePayload.no_show_excused = false;
       updatePayload.no_show_excuse_reason = null;
 
-      // Prepare fee (pending) depending on clinic settings
       const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
       const shouldPending =
         rule.auto_charge_enabled && rule.no_show_fee_cents > 0;
@@ -131,7 +125,6 @@ export async function PATCH(
     }
 
     if (nextStatus === "scheduled") {
-      // reset timestamps when moving back to scheduled (if allowed by transition rules)
       updatePayload.checked_in_at = null;
       updatePayload.cancelled_at = null;
       updatePayload.no_show_detected_at = null;
@@ -141,7 +134,6 @@ export async function PATCH(
       updatePayload.no_show_excuse_reason = null;
     }
   } else if (action === "check_in") {
-    // Keep current status rules: check_in always sets checked_in_at and sets status checked_in
     nextStatus = "checked_in";
 
     const transitionErr = validateStatusTransition(currentStatus, nextStatus);
@@ -152,7 +144,6 @@ export async function PATCH(
     updatePayload.status = nextStatus;
     updatePayload.checked_in_at = new Date().toISOString();
 
-    // Clean up billing flags
     updatePayload.no_show_fee_pending = false;
     updatePayload.no_show_fee_charged = false;
     updatePayload.no_show_detected_at = null;
