@@ -12,7 +12,6 @@ type Appointment = {
   checked_in_at: string | null;
   no_show_excused: boolean | null;
   no_show_fee_charged: boolean | null;
-  no_show_fee_pending: boolean | null;
 };
 
 function toLocalDisplay(isoOrTs: string) {
@@ -28,6 +27,8 @@ function toLocalDisplay(isoOrTs: string) {
 export default function DashboardClient() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(false);
+
+  const [creating, setCreating] = useState(false);
 
   const [patientName, setPatientName] = useState("");
   const [startsAtLocal, setStartsAtLocal] = useState("");
@@ -75,6 +76,9 @@ export default function DashboardClient() {
   }
 
   async function addAppointment() {
+    // anti-spam: si ya estás creando, no haces nada
+    if (creating) return;
+
     setError(null);
     setInfo(null);
 
@@ -88,6 +92,7 @@ export default function DashboardClient() {
       return;
     }
 
+    setCreating(true);
     try {
       const startsAtIso = new Date(startsAtLocal).toISOString();
 
@@ -103,13 +108,16 @@ export default function DashboardClient() {
         return;
       }
 
+      // limpieza inmediata para UX (y también quita incentivo de spamear)
       setPatientName("");
       setStartsAtLocal("");
-      setInfo("Appointment created.");
 
+      setInfo("Appointment created.");
       await loadAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to add");
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -186,6 +194,15 @@ export default function DashboardClient() {
 
   useEffect(() => {
     loadAppointments();
+
+    // auto-refresh suave para que cambios del cron se vean sin tocar Refresh
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        loadAppointments();
+      }
+    }, 15000);
+
+    return () => window.clearInterval(id);
   }, []);
 
   const sortedAppointments = useMemo(() => {
@@ -208,6 +225,7 @@ export default function DashboardClient() {
           value={patientName}
           onChange={(e) => setPatientName(e.target.value)}
           style={{ padding: 10, minWidth: 240 }}
+          disabled={creating}
         />
 
         <input
@@ -216,6 +234,7 @@ export default function DashboardClient() {
           value={startsAtLocal}
           onChange={(e) => setStartsAtLocal(e.target.value)}
           style={{ padding: 10, border: "1px solid #333" }}
+          disabled={creating}
         />
 
         <button
@@ -223,12 +242,13 @@ export default function DashboardClient() {
           onClick={openDatePicker}
           style={{ padding: "10px 12px", border: "1px solid #333" }}
           title="Pick date"
+          disabled={creating}
         >
           📅 Pick date
         </button>
 
-        <button onClick={addAppointment} style={{ padding: "10px 14px" }}>
-          Add
+        <button onClick={addAppointment} style={{ padding: "10px 14px" }} disabled={creating}>
+          {creating ? "Adding..." : "Add"}
         </button>
 
         <button
@@ -262,10 +282,7 @@ export default function DashboardClient() {
                 a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : String(a.status);
 
               const checkInLabel = a.checked_in_at ? toLocalDisplay(a.checked_in_at) : "-";
-
-              let feeLabel = "-";
-              if (a.no_show_fee_charged) feeLabel = "Charged";
-              else if (a.no_show_fee_pending) feeLabel = "Pending";
+              const feeLabel = a.no_show_fee_charged ? "Charged" : "-";
 
               return (
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
