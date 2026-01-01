@@ -46,7 +46,6 @@ export async function GET(req: Request) {
     const updatedIds: string[] = [];
     const perClinic: any[] = [];
 
-    // 2) per clinic
     for (const c of clinics ?? []) {
       const clinicId = c.id as string;
 
@@ -80,20 +79,17 @@ export async function GET(req: Request) {
       }
 
       const threshold = new Date(now.getTime() - graceMinutes * 60 * 1000);
-      // Mantener ISO completo con Z (timestamptz) para que Supabase compare bien
       const thresholdIso = threshold.toISOString();
-
 
       // ---- candidates query ----
       const { data: candidates, error: candError } = await supabase
-      .from("appointments")
-      .select("id")
-      .eq("clinic_id", clinicId)
-      .eq("status", "scheduled")
-      .is("checked_in_at", null)
-      .lte("starts_at", thresholdIso)
-      .or("no_show_excused.is.null,no_show_excused.eq.false");
-
+        .from("appointments")
+        .select("id")
+        .eq("clinic_id", clinicId)
+        .eq("status", "scheduled")
+        .is("checked_in_at", null)
+        .lte("starts_at", thresholdIso)
+        .or("no_show_excused.is.null,no_show_excused.eq.false");
 
       if (candError) {
         await supabase.from("cron_runs").insert({
@@ -137,6 +133,7 @@ export async function GET(req: Request) {
           .from("appointments")
           .update({
             status: "no_show",
+            no_show_detected_at: now.toISOString(),
             no_show_fee_charged: false,
             no_show_fee_pending: feePending,
           })
