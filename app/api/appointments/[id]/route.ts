@@ -27,12 +27,12 @@ async function getClinicChargeRule(supabaseAdmin: any, clinicId: string) {
 
 export async function PATCH(
   req: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+  { params }: { params: { id: string } }
+): Promise<Response> {
   const ctx = await getServerContext(req);
-  if ("error" in ctx) return ctx.error;
+  if ("error" in ctx) return ctx.error as unknown as Response;
 
-  const { id: appointmentId } = await params;
+  const appointmentId = params.id;
 
   const body = await req.json().catch(() => ({}));
   const action = String(body?.action || "");
@@ -50,7 +50,8 @@ export async function PATCH(
     .eq("clinic_id", ctx.clinicId)
     .maybeSingle();
 
-  if (apptErr) return NextResponse.json({ error: apptErr.message }, { status: 500 });
+  if (apptErr)
+    return NextResponse.json({ error: apptErr.message }, { status: 500 });
   if (!appt) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const currentStatus = normalizeStatus(appt.status);
@@ -167,7 +168,8 @@ export async function PATCH(
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId);
 
-  if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+  if (updErr)
+    return NextResponse.json({ error: updErr.message }, { status: 500 });
 
   return NextResponse.json({ ok: true }, { status: 200 });
 }
