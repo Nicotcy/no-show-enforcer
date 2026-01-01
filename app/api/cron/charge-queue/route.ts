@@ -3,11 +3,29 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL as string,
-  process.env.SUPABASE_SERVICE_ROLE_KEY as string,
-  { auth: { persistSession: false } }
-);
+function getSupabaseUrl() {
+  // Preferimos SUPABASE_URL, pero si está vacío, caemos a NEXT_PUBLIC_SUPABASE_URL
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  return url;
+}
+
+function getProjectRef(url: string) {
+  // https://xxxx.supabase.co -> "xxxx"
+  try {
+    const u = new URL(url);
+    const host = u.hostname; // xxxx.supabase.co
+    return host.split(".")[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+const supabaseUrl = getSupabaseUrl();
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: { persistSession: false },
+});
 
 function isAuthorized(req: Request) {
   const url = new URL(req.url);
@@ -29,10 +47,23 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const nowIso = new Date().toISOString();
+    if (!supabaseUrl) {
+      return NextResponse.json(
+        { error: "Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL" },
+        { status: 500 }
+      );
+    }
+    if (!supabaseKey) {
+      return NextResponse.json(
+        { error: "Missing SUPABASE_SERVICE_ROLE_KEY" },
+        { status: 500 }
+      );
+    }
 
-    // 1) Candidatos simples y robustos:
-    // pending=true && charged=false && status=no_show && (excused null/false) && processing_at IS NULL
+    const nowIso = new Date().toISOString();
+    const supabaseProjectRef = getProjectRef(supabaseUrl);
+
+    // 1) candidatos: pending && !charged && status=no_show && (excused null/false) && processing_at IS NULL
     const { data: candidates, error: candError } = await supabase
       .from("appointments")
       .select("id, clinic_id")
@@ -45,24 +76,37 @@ export async function GET(req: Request) {
 
     if (candError) {
       return NextResponse.json(
-        { step: "candidates-error", error: candError.message },
+        {
+          step: "candidates-error",
+          error: candError.message,
+          supabaseProjectRef,
+          supabaseUrlUsed: supabaseUrl,
+        },
         { status: 500 }
       );
     }
 
-    const candidateIds = (candidates ?? []).map((c: any) => c.id as string);
+    const candidateIds = (candidates ?? []).map((c: any) => String(c.id));
     const clinicIds = Array.from(
-      new Set((candidates ?? []).map((c: any) => c.clinic_id as string))
+      new Set((candidates ?? []).map((c: any) => String(c.clinic_id)))
     );
 
     if (candidateIds.length === 0) {
       return NextResponse.json(
-        { step: "done", now: nowIso, candidateCount: 0, eligibleCount: 0, queuedCount: 0 },
+        {
+          step: "done",
+          now: nowIso,
+          candidateCount: 0,
+          eligibleCount: 0,
+          queuedCount: 0,
+          supabaseProjectRef,
+          supabaseUrlUsed: supabaseUrl,
+        },
         { status: 200 }
       );
     }
 
-    // 2) Seguridad extra: si la clínica ha cambiado settings (auto_charge off o fee 0), no encolamos
+    // 2) seguridad extra: settings actuales
     const { data: settingsRows, error: settingsError } = await supabase
       .from("clinic_settings")
       .select("clinic_id, auto_charge_enabled, no_show_fee_cents")
@@ -70,7 +114,12 @@ export async function GET(req: Request) {
 
     if (settingsError) {
       return NextResponse.json(
-        { step: "settings-error", error: settingsError.message },
+        {
+          step: "settings-error",
+          error: settingsError.message,
+          supabaseProjectRef,
+          supabaseUrlUsed: supabaseUrl,
+        },
         { status: 500 }
       );
     }
@@ -79,7 +128,10 @@ export async function GET(req: Request) {
     for (const r of settingsRows ?? []) {
       settingsMap.set(String((r as any).clinic_id), {
         auto: Boolean((r as any).auto_charge_enabled),
-        fee: typeof (r as any).no_show_fee_cents === "number" ? (r as any).no_show_fee_cents : 0,
+        fee:
+          typeof (r as any).no_show_fee_cents === "number"
+            ? (r as any).no_show_fee_cents
+            : 0,
       });
     }
 
@@ -98,13 +150,15 @@ export async function GET(req: Request) {
           candidateCount: candidateIds.length,
           eligibleCount: 0,
           queuedCount: 0,
-          note: "No eligible rows after checking clinic_settings (auto_charge_enabled/fee).",
+          note: "No eligible rows after checking clinic_settings.",
+          supabaseProjectRef,
+          supabaseUrlUsed: supabaseUrl,
         },
         { status: 200 }
       );
     }
 
-    // 3) Lock: marcamos processing_at + last_attempt_at
+    // 3) lock
     const { data: locked, error: lockError } = await supabase
       .from("appointments")
       .update({
@@ -116,27 +170,17 @@ export async function GET(req: Request) {
 
     if (lockError) {
       return NextResponse.json(
-        { step: "lock-error", error: lockError.message },
+        {
+          step: "lock-error",
+          error: lockError.message,
+          supabaseProjectRef,
+          supabaseUrlUsed: supabaseUrl,
+        },
         { status: 500 }
       );
     }
 
-    const lockedIds = (locked ?? []).map((x: any) => x.id as string);
-
-    // 4) Intento de log (si falla, NO rompemos el job)
-    const { error: logError } = await supabase.from("cron_runs").insert({
-      clinic_id: null,
-      job: "charge-queue",
-      candidate_count: candidateIds.length,
-      updated_count: lockedIds.length,
-      details: {
-        ok: true,
-        now: nowIso,
-        batchSize: BATCH_SIZE,
-        eligibleIds,
-        lockedIds,
-      },
-    });
+    const lockedIds = (locked ?? []).map((x: any) => String(x.id));
 
     return NextResponse.json(
       {
@@ -146,7 +190,8 @@ export async function GET(req: Request) {
         eligibleCount: eligibleIds.length,
         queuedCount: lockedIds.length,
         queuedIds: lockedIds,
-        logError: logError ? logError.message : null,
+        supabaseProjectRef,
+        supabaseUrlUsed: supabaseUrl,
       },
       { status: 200 }
     );
