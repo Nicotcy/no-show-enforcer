@@ -106,31 +106,37 @@ export async function PATCH(
     return NextResponse.json({ error: transitionErr }, { status: 400 });
   }
 
-  const updatePayload: Record<string, any> = { status: nextStatus };
+const updatePayload: Record<string, any> = { status: nextStatus };
 
-  // coherencia manual = cron
-  if (nextStatus === "no_show") {
-    updatePayload.no_show_detected_at = new Date().toISOString();
+// si se cancela o se hace check-in, nunca debe quedar nada de cobro pendiente/charged
+if (nextStatus === "canceled" || nextStatus === "checked_in") {
+  updatePayload.no_show_fee_pending = false;
+  updatePayload.no_show_fee_charged = false;
+}
 
-    // pending solo si: auto_charge_enabled=true y fee>0 y NO está excusado
-    const excused = Boolean(appt.no_show_excused);
-    if (excused) {
-      updatePayload.no_show_fee_pending = false;
+// coherencia manual = cron
+if (nextStatus === "no_show") {
+  updatePayload.no_show_detected_at = new Date().toISOString();
+
+  // pending solo si: auto_charge_enabled=true y fee>0 y NO está excusado
+  const excused = Boolean(appt.no_show_excused);
+  if (excused) {
+    updatePayload.no_show_fee_pending = false;
+    updatePayload.no_show_fee_charged = false;
+  } else {
+    try {
+      const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
+      updatePayload.no_show_fee_pending =
+        rule.autoChargeEnabled && rule.feeCents > 0;
       updatePayload.no_show_fee_charged = false;
-    } else {
-      try {
-        const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
-        updatePayload.no_show_fee_pending =
-          rule.autoChargeEnabled && rule.feeCents > 0;
-        updatePayload.no_show_fee_charged = false;
-      } catch (e: any) {
-        return NextResponse.json(
-          { error: e?.message || "Failed to load clinic charge rule" },
-          { status: 500 }
-        );
-      }
+    } catch (e: any) {
+      return NextResponse.json(
+        { error: e?.message || "Failed to load clinic charge rule" },
+        { status: 500 }
+      );
     }
   }
+}
 
   const { error: updErr } = await ctx.supabaseAdmin
     .from("appointments")
