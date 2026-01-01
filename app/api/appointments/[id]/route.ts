@@ -8,6 +8,8 @@ import {
 
 export const runtime = "nodejs";
 
+const UNDO_NO_SHOW_WINDOW_MINUTES = 30;
+
 async function getClinicChargeRule(supabaseAdmin: any, clinicId: string) {
   const { data, error } = await supabaseAdmin
     .from("clinic_settings")
@@ -49,7 +51,21 @@ export async function PATCH(
   // Load current appointment (scoped by clinic)
   const { data: appt, error: apptErr } = await ctx.supabaseAdmin
     .from("appointments")
-    .select("id, clinic_id, starts_at, status, checked_in_at, no_show_excused")
+    .select(
+      [
+        "id",
+        "clinic_id",
+        "starts_at",
+        "status",
+        "checked_in_at",
+        "cancelled_at",
+        "no_show_excused",
+        "no_show_excuse_reason",
+        "no_show_detected_at",
+        "no_show_fee_pending",
+        "no_show_fee_charged",
+      ].join(", ")
+    )
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId)
     .maybeSingle();
@@ -102,14 +118,58 @@ export async function PATCH(
     );
   }
 
-  const transitionErr = validateStatusTransition(currentStatus, nextStatus, {
-    hasCheckedIn,
-  });
-  if (transitionErr) {
-    return NextResponse.json({ error: transitionErr }, { status: 400 });
+  // ✅ UNDO seguro: permitir volver a scheduled desde late o no_show con reglas
+  const isUndoToScheduled =
+    nextStatus === "scheduled" &&
+    (currentStatus === "late" || currentStatus === "no_show");
+
+  if (!isUndoToScheduled) {
+    const transitionErr = validateStatusTransition(currentStatus, nextStatus, {
+      hasCheckedIn,
+    });
+    if (transitionErr) {
+      return NextResponse.json({ error: transitionErr }, { status: 400 });
+    }
+  } else {
+    // reglas específicas de seguridad para deshacer
+    if (hasCheckedIn) {
+      return NextResponse.json(
+        { error: "Checked-in appointments cannot change status." },
+        { status: 400 }
+      );
+    }
+
+    if (currentStatus === "no_show") {
+      // no permitir deshacer si ya se cobró
+      if (appt.no_show_fee_charged) {
+        return NextResponse.json(
+          { error: "Cannot undo a no-show that has already been charged." },
+          { status: 400 }
+        );
+      }
+
+      // ventana corta para evitar reescritura histórica
+      const detectedAt = appt.no_show_detected_at as string | null | undefined;
+      if (detectedAt) {
+        const detectedMs = new Date(detectedAt).getTime();
+        if (!Number.isNaN(detectedMs)) {
+          const ageMinutes = (Date.now() - detectedMs) / 60000;
+          if (ageMinutes > UNDO_NO_SHOW_WINDOW_MINUTES) {
+            return NextResponse.json(
+              {
+                error:
+                  `Undo window expired (${UNDO_NO_SHOW_WINDOW_MINUTES} min). ` +
+                  "Use Excuse if you need to waive the fee.",
+              },
+              { status: 400 }
+            );
+          }
+        }
+      }
+    }
   }
 
-  // ✅ NUEVA REGLA: no permitir no_show en citas futuras
+  // ✅ regla ya existente: no permitir no_show en citas futuras
   if (nextStatus === "no_show") {
     const startsAt = appt.starts_at as string | null | undefined;
     if (startsAt) {
@@ -124,6 +184,17 @@ export async function PATCH(
   }
 
   const updatePayload: Record<string, any> = { status: nextStatus };
+
+  // Undo to scheduled: limpiar TODO lo que “ensucia” outcomes/cobros
+  if (nextStatus === "scheduled") {
+    updatePayload.checked_in_at = null;
+    updatePayload.cancelled_at = null;
+    updatePayload.no_show_detected_at = null;
+    updatePayload.no_show_fee_pending = false;
+    updatePayload.no_show_fee_charged = false;
+    updatePayload.no_show_excused = false;
+    updatePayload.no_show_excuse_reason = null;
+  }
 
   // Cancel: registra hora y limpia cobros
   if (nextStatus === "canceled") {
