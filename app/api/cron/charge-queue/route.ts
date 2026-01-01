@@ -12,7 +12,7 @@ const supabase = createClient(
 function isAuthorized(req: Request) {
   const url = new URL(req.url);
   const secret = url.searchParams.get("secret");
-  const authHeader = req.headersget?.("authorization") || "";
+  const authHeader = req.headers.get("authorization") || "";
   const expectedHeader = `Bearer ${process.env.CRON_SECRET}`;
 
   return (
@@ -43,10 +43,7 @@ export async function GET(req: Request) {
       .limit(BATCH_SIZE);
 
     if (candError) {
-      return NextResponse.json(
-        { error: candError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: candError.message }, { status: 500 });
     }
 
     if (!candidates || candidates.length === 0) {
@@ -56,9 +53,9 @@ export async function GET(req: Request) {
       );
     }
 
-    const candidateIds = candidates.map((c: any) => c.id);
+    const candidateIds = candidates.map((c: any) => String(c.id));
     const clinicIds = Array.from(
-      new Set(candidates.map((c: any) => c.clinic_id))
+      new Set(candidates.map((c: any) => String(c.clinic_id)))
     );
 
     // 2) Revalidar settings actuales por clínica
@@ -68,24 +65,25 @@ export async function GET(req: Request) {
       .in("clinic_id", clinicIds);
 
     if (settingsError) {
-      return NextResponse.json(
-        { error: settingsError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: settingsError.message }, { status: 500 });
     }
 
     const settingsMap = new Map<string, { auto: boolean; fee: number }>();
     for (const r of settingsRows ?? []) {
-      settingsMap.set(r.clinic_id, {
-        auto: Boolean(r.auto_charge_enabled),
-        fee: typeof r.no_show_fee_cents === "number" ? r.no_show_fee_cents : 0,
+      settingsMap.set(String((r as any).clinic_id), {
+        auto: Boolean((r as any).auto_charge_enabled),
+        fee:
+          typeof (r as any).no_show_fee_cents === "number"
+            ? (r as any).no_show_fee_cents
+            : 0,
       });
     }
 
     const eligibleIds: string[] = [];
     for (const c of candidates) {
-      const s = settingsMap.get(c.clinic_id);
-      if (s && s.auto && s.fee > 0) eligibleIds.push(c.id);
+      const clinicId = String((c as any).clinic_id);
+      const s = settingsMap.get(clinicId);
+      if (s && s.auto && s.fee > 0) eligibleIds.push(String((c as any).id));
     }
 
     if (eligibleIds.length === 0) {
@@ -105,13 +103,10 @@ export async function GET(req: Request) {
       .in("id", eligibleIds);
 
     if (lockError) {
-      return NextResponse.json(
-        { error: lockError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: lockError.message }, { status: 500 });
     }
 
-    // 4) Log opcional (best-effort)
+    // 4) Log opcional (best-effort). Si falla, no rompemos.
     await supabase.from("cron_runs").insert({
       clinic_id: null,
       job: "charge-queue",
