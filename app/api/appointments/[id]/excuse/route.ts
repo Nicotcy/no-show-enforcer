@@ -66,10 +66,15 @@ export async function POST(
     .update({
       no_show_excused: true,
       no_show_excuse_reason: reason,
+      // si se excusa, se cancela cualquier cola/cobro asociado
+      no_show_fee_pending: false,
+      no_show_fee_charged: false,
     })
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId)
-    .select("id, no_show_excused, no_show_excuse_reason, status")
+    .select(
+      "id, status, no_show_excused, no_show_excuse_reason, no_show_fee_pending, no_show_fee_charged"
+    )
     .maybeSingle();
 
   if (updErr) {
