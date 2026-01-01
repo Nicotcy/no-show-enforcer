@@ -64,6 +64,10 @@ function AppointmentRow({
   const disabledTitle =
     "Solo se puede marcar cuando la cita ya ha empezado (después de la hora de inicio).";
 
+  // ✅ Undo visible si late o no_show, siempre que NO esté charged
+  const canUndo =
+    (a.status === "late" || a.status === "no_show") && !a.no_show_fee_charged;
+
   return (
     <tr style={{ borderBottom: "1px solid #222" }}>
       <td style={{ padding: 10 }}>{a.patient_name}</td>
@@ -74,14 +78,14 @@ function AppointmentRow({
       </td>
       <td style={{ padding: 10, whiteSpace: "nowrap" }}>{FeeLabel(a)}</td>
       <td style={{ padding: 10, whiteSpace: "nowrap" }}>
-        <button onClick={() => onCheckIn(a.id)} style={{ marginRight: 8 }}>
+        <button onClick={() => onCheckIn(a.id)} style={{ marginRight: 10 }}>
           Check-in
         </button>
 
         <button
           onClick={() => onUpdateStatus(a.id, "late")}
           style={{
-            marginRight: 8,
+            marginRight: 10,
             opacity: future ? 0.5 : 1,
             cursor: future ? "not-allowed" : "pointer",
           }}
@@ -94,7 +98,7 @@ function AppointmentRow({
         <button
           onClick={() => onUpdateStatus(a.id, "no_show")}
           style={{
-            marginRight: 8,
+            marginRight: 10,
             opacity: future ? 0.5 : 1,
             cursor: future ? "not-allowed" : "pointer",
           }}
@@ -104,10 +108,22 @@ function AppointmentRow({
           Mark no-show
         </button>
 
-        <button onClick={() => onUpdateStatus(a.id, "canceled")} style={{ marginRight: 8 }}>
+        <button onClick={() => onUpdateStatus(a.id, "canceled")} style={{ marginRight: 10 }}>
           Cancel
         </button>
-        <button onClick={() => onExcuse(a.id)}>Excuse</button>
+
+        <button onClick={() => onExcuse(a.id)} style={{ marginRight: 10 }}>
+          Excuse
+        </button>
+
+        {canUndo ? (
+          <button
+            onClick={() => onUpdateStatus(a.id, "scheduled")}
+            title="Undo: volver a scheduled"
+          >
+            Undo
+          </button>
+        ) : null}
       </td>
     </tr>
   );
@@ -131,7 +147,6 @@ export default function DashboardClient() {
   function openDatePicker() {
     const el = dateInputRef.current;
     if (!el) return;
-
     const anyEl = el as any;
     if (typeof anyEl.showPicker === "function") anyEl.showPicker();
     else el.focus();
@@ -305,9 +320,7 @@ export default function DashboardClient() {
       else up.push(a);
     }
 
-    // Upcoming: lo más cercano primero
-    up.sort((a, b) => new Date(a.starts_at).getTime() - new Date(a.starts_at).getTime());
-    // Past: lo más reciente primero
+    up.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
     pa.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime());
 
     return { upcoming: up, past: pa };
