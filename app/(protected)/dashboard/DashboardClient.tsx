@@ -12,6 +12,7 @@ type Appointment = {
   checked_in_at: string | null;
   no_show_excused: boolean | null;
   no_show_fee_charged: boolean | null;
+  no_show_fee_pending: boolean | null;
 };
 
 function toLocalDisplay(isoOrTs: string) {
@@ -29,6 +30,7 @@ export default function DashboardClient() {
   const [loading, setLoading] = useState(false);
 
   const [creating, setCreating] = useState(false);
+  const creatingLockRef = useRef(false);
 
   const [patientName, setPatientName] = useState("");
   const [startsAtLocal, setStartsAtLocal] = useState("");
@@ -76,8 +78,9 @@ export default function DashboardClient() {
   }
 
   async function addAppointment() {
-    // anti-spam: si ya estás creando, no haces nada
-    if (creating) return;
+    // anti-spam: bloqueo síncrono (evita doble click en el mismo tick)
+    if (creatingLockRef.current) return;
+    creatingLockRef.current = true;
 
     setError(null);
     setInfo(null);
@@ -85,10 +88,12 @@ export default function DashboardClient() {
     const name = patientName.trim();
     if (!name) {
       setError("Patient name is required.");
+      creatingLockRef.current = false;
       return;
     }
     if (!startsAtLocal) {
       setError("Start time is required.");
+      creatingLockRef.current = false;
       return;
     }
 
@@ -108,7 +113,6 @@ export default function DashboardClient() {
         return;
       }
 
-      // limpieza inmediata para UX (y también quita incentivo de spamear)
       setPatientName("");
       setStartsAtLocal("");
 
@@ -118,6 +122,7 @@ export default function DashboardClient() {
       setError(e?.message || "Failed to add");
     } finally {
       setCreating(false);
+      creatingLockRef.current = false;
     }
   }
 
@@ -195,7 +200,7 @@ export default function DashboardClient() {
   useEffect(() => {
     loadAppointments();
 
-    // auto-refresh suave para que cambios del cron se vean sin tocar Refresh
+    // auto-refresh suave para cambios del cron sin tocar Refresh
     const id = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         loadAppointments();
@@ -282,7 +287,10 @@ export default function DashboardClient() {
                 a.status === "no_show" && a.no_show_excused ? "no_show (excused)" : String(a.status);
 
               const checkInLabel = a.checked_in_at ? toLocalDisplay(a.checked_in_at) : "-";
-              const feeLabel = a.no_show_fee_charged ? "Charged" : "-";
+
+              let feeLabel = "-";
+              if (a.no_show_fee_charged) feeLabel = "Charged";
+              else if (a.no_show_fee_pending) feeLabel = "Pending";
 
               return (
                 <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
