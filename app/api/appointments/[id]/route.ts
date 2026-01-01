@@ -49,22 +49,11 @@ export async function PATCH(
   const action = String(body.action ?? "").trim();
 
   // Load current appointment (scoped by clinic)
+  // IMPORTANTE: string literal para que Supabase types no devuelva GenericStringError
   const { data: appt, error: apptErr } = await ctx.supabaseAdmin
     .from("appointments")
     .select(
-      [
-        "id",
-        "clinic_id",
-        "starts_at",
-        "status",
-        "checked_in_at",
-        "cancelled_at",
-        "no_show_excused",
-        "no_show_excuse_reason",
-        "no_show_detected_at",
-        "no_show_fee_pending",
-        "no_show_fee_charged",
-      ].join(", ")
+      "id, clinic_id, starts_at, status, checked_in_at, cancelled_at, no_show_excused, no_show_excuse_reason, no_show_detected_at, no_show_fee_pending, no_show_fee_charged"
     )
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId)
@@ -169,7 +158,7 @@ export async function PATCH(
     }
   }
 
-  // ✅ regla ya existente: no permitir no_show en citas futuras
+  // ✅ regla existente: no permitir no_show en citas futuras
   if (nextStatus === "no_show") {
     const startsAt = appt.starts_at as string | null | undefined;
     if (startsAt) {
@@ -242,3 +231,4 @@ export async function PATCH(
 
   return NextResponse.json({ ok: true }, { status: 200 });
 }
+
