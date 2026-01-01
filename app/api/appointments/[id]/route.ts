@@ -68,7 +68,7 @@ export async function PATCH(
   const { id: appointmentId } = await params;
 
   const body = await req.json().catch(() => ({} as any));
-  const action = String(body.action ?? "").trim(); // "excuse" | "check_in" | "" (default set_status)
+  const action = String(body.action ?? "").trim();
 
   // Load current appointment (must belong to this clinic)
   const { data: appt, error: apptErr } = await ctx.supabaseAdmin
@@ -152,9 +152,16 @@ export async function PATCH(
     return NextResponse.json({ error: transitionErr }, { status: 400 });
   }
 
+  const updatePayload: Record<string, any> = { status: nextStatus };
+
+  // Si se marca como no_show manualmente, guardamos también el momento de detección.
+  if (nextStatus === "no_show") {
+    updatePayload.no_show_detected_at = new Date().toISOString();
+  }
+
   const { error: updErr } = await ctx.supabaseAdmin
     .from("appointments")
-    .update({ status: nextStatus })
+    .update(updatePayload)
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinic_id);
 
