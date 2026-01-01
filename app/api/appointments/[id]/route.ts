@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getServerContext } from "@/lib/server/context";
 import {
   ALLOWED_STATUSES,
@@ -15,34 +15,38 @@ async function getClinicChargeRule(supabaseAdmin: any, clinicId: string) {
     .eq("clinic_id", clinicId)
     .limit(1);
 
-  if (error) throw error;
+  if (error) throw new Error(`Failed to read clinic_settings: ${error.message}`);
 
   const row = data?.[0] ?? null;
+  const autoChargeEnabled = Boolean(row?.auto_charge_enabled);
+  const feeCents =
+    typeof row?.no_show_fee_cents === "number" ? row.no_show_fee_cents : 0;
 
-  return {
-    auto_charge_enabled: Boolean(row?.auto_charge_enabled),
-    no_show_fee_cents: Number(row?.no_show_fee_cents ?? 0),
-  };
+  return { autoChargeEnabled, feeCents };
 }
 
 export async function PATCH(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
-): Promise<Response> {
-  const ctx = await getServerContext(req);
-  if ("error" in ctx) return ctx.error;
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: appointmentId } = await params;
 
-  const { id: appointmentId } = await context.params;
-
-  const body = await req.json().catch(() => ({}));
-  const action = String(body?.action || "");
-  const status = String(body?.status || "");
-
-  if (!action) {
-    return NextResponse.json({ error: "Missing action" }, { status: 400 });
+  let ctx;
+  try {
+    ctx = await getServerContext();
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "Failed to load context" },
+      { status: 500 }
+    );
   }
 
-  // Fetch appointment (scoped to clinic)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const body = await req.json().catch(() => ({} as any));
+  const action = String(body.action ?? "").trim();
+
+  // Load current appointment (scoped by clinic)
   const { data: appt, error: apptErr } = await ctx.supabaseAdmin
     .from("appointments")
     .select("id, clinic_id, starts_at, status, checked_in_at, no_show_excused")
@@ -50,107 +54,111 @@ export async function PATCH(
     .eq("clinic_id", ctx.clinicId)
     .maybeSingle();
 
-  if (apptErr)
-    return NextResponse.json({ error: apptErr.message }, { status: 500 });
-  if (!appt) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (apptErr) {
+    return NextResponse.json(
+      { error: `Failed to read appointment: ${apptErr.message}` },
+      { status: 500 }
+    );
+  }
+  if (!appt) {
+    return NextResponse.json({ error: "Appointment not found" }, { status: 404 });
+  }
 
-  const currentStatus = normalizeStatus(appt.status);
-  let nextStatus = currentStatus;
+  const currentStatus = normalizeStatus(appt.status) ?? "scheduled";
+  const hasCheckedIn = Boolean(appt.checked_in_at);
 
-  const updatePayload: Record<string, any> = {};
-
-  if (action === "set_status") {
-    const normalized = normalizeStatus(status);
-
-    if (!normalized || !ALLOWED_STATUSES.includes(normalized)) {
-      return NextResponse.json({ error: "Invalid status" }, { status: 400 });
-    }
-
-    nextStatus = normalized;
-
-    const transitionErr = validateStatusTransition(currentStatus, nextStatus);
+  // Action: check_in (guarda timestamp real + limpia flags de cobro)
+  if (action === "check_in") {
+    const transitionErr = validateStatusTransition(currentStatus, "checked_in", {
+      hasCheckedIn,
+    });
     if (transitionErr) {
       return NextResponse.json({ error: transitionErr }, { status: 400 });
     }
 
-    // Hard rule: no se puede marcar no_show en citas futuras (backend source of truth)
-    if (nextStatus === "no_show") {
-      const startsAt = appt?.starts_at as string | null | undefined;
-      if (startsAt) {
-        const startsMs = new Date(startsAt).getTime();
-        if (!Number.isNaN(startsMs) && startsMs > Date.now()) {
-          return NextResponse.json(
-            { error: "Cannot mark a future appointment as no_show" },
-            { status: 400 }
-          );
-        }
+    const { error: updErr } = await ctx.supabaseAdmin
+      .from("appointments")
+      .update({
+        checked_in_at: new Date().toISOString(),
+        status: "checked_in",
+        // si se hace check-in, nunca debe quedar nada de cobro pendiente/charged
+        no_show_fee_pending: false,
+        no_show_fee_charged: false,
+      })
+      .eq("id", appointmentId)
+      .eq("clinic_id", ctx.clinicId);
+
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+    return NextResponse.json({ ok: true }, { status: 200 });
+  }
+
+  // Default: set_status
+  const nextStatus = normalizeStatus(body.status);
+  if (!nextStatus) {
+    return NextResponse.json(
+      { error: `Invalid status. Allowed: ${ALLOWED_STATUSES.join(", ")}` },
+      { status: 400 }
+    );
+  }
+
+  const transitionErr = validateStatusTransition(currentStatus, nextStatus, {
+    hasCheckedIn,
+  });
+  if (transitionErr) {
+    return NextResponse.json({ error: transitionErr }, { status: 400 });
+  }
+
+  // ✅ NUEVA REGLA: no permitir no_show en citas futuras
+  if (nextStatus === "no_show") {
+    const startsAt = appt.starts_at as string | null | undefined;
+    if (startsAt) {
+      const startsMs = new Date(startsAt).getTime();
+      if (!Number.isNaN(startsMs) && startsMs > Date.now()) {
+        return NextResponse.json(
+          { error: "Cannot mark a future appointment as no_show" },
+          { status: 400 }
+        );
       }
     }
+  }
 
-    updatePayload.status = nextStatus;
+  const updatePayload: Record<string, any> = { status: nextStatus };
 
-    if (nextStatus === "checked_in") {
-      updatePayload.checked_in_at = new Date().toISOString();
-      updatePayload.no_show_fee_pending = false;
-      updatePayload.no_show_fee_charged = false;
-      updatePayload.no_show_detected_at = null;
-      updatePayload.no_show_excused = false;
-      updatePayload.no_show_excuse_reason = null;
-    }
-
-    if (nextStatus === "canceled") {
-      updatePayload.cancelled_at = new Date().toISOString();
-      updatePayload.no_show_fee_pending = false;
-      updatePayload.no_show_fee_charged = false;
-      updatePayload.no_show_detected_at = null;
-      updatePayload.no_show_excused = false;
-      updatePayload.no_show_excuse_reason = null;
-    }
-
-    if (nextStatus === "no_show") {
-      updatePayload.no_show_detected_at = new Date().toISOString();
-      updatePayload.no_show_excused = false;
-      updatePayload.no_show_excuse_reason = null;
-
-      const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
-      const shouldPending =
-        rule.auto_charge_enabled && rule.no_show_fee_cents > 0;
-
-      updatePayload.no_show_fee_pending = shouldPending;
-      updatePayload.no_show_fee_charged = false;
-    }
-
-    if (nextStatus === "late") {
-      // no extra side effects for now
-    }
-
-    if (nextStatus === "scheduled") {
-      updatePayload.checked_in_at = null;
-      updatePayload.cancelled_at = null;
-      updatePayload.no_show_detected_at = null;
-      updatePayload.no_show_fee_pending = false;
-      updatePayload.no_show_fee_charged = false;
-      updatePayload.no_show_excused = false;
-      updatePayload.no_show_excuse_reason = null;
-    }
-  } else if (action === "check_in") {
-    nextStatus = "checked_in";
-
-    const transitionErr = validateStatusTransition(currentStatus, nextStatus);
-    if (transitionErr) {
-      return NextResponse.json({ error: transitionErr }, { status: 400 });
-    }
-
-    updatePayload.status = nextStatus;
-    updatePayload.checked_in_at = new Date().toISOString();
-
+  // Cancel: registra hora y limpia cobros
+  if (nextStatus === "canceled") {
+    updatePayload.cancelled_at = new Date().toISOString();
     updatePayload.no_show_fee_pending = false;
     updatePayload.no_show_fee_charged = false;
-    updatePayload.no_show_detected_at = null;
-    updatePayload.no_show_excused = false;
-    updatePayload.no_show_excuse_reason = null;
-  } else {
-    return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+  }
+
+  // Checked_in por set_status (por si alguien lo llama así): limpia cobros también
+  if (nextStatus === "checked_in") {
+    updatePayload.no_show_fee_pending = false;
+    updatePayload.no_show_fee_charged = false;
+  }
+
+  // No-show: coherencia manual = cron
+  if (nextStatus === "no_show") {
+    updatePayload.no_show_detected_at = new Date().toISOString();
+
+    const excused = Boolean(appt.no_show_excused);
+    if (excused) {
+      updatePayload.no_show_fee_pending = false;
+      updatePayload.no_show_fee_charged = false;
+    } else {
+      try {
+        const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
+        updatePayload.no_show_fee_pending =
+          rule.autoChargeEnabled && rule.feeCents > 0;
+        updatePayload.no_show_fee_charged = false;
+      } catch (e: any) {
+        return NextResponse.json(
+          { error: e?.message || "Failed to load clinic charge rule" },
+          { status: 500 }
+        );
+      }
+    }
   }
 
   const { error: updErr } = await ctx.supabaseAdmin
@@ -159,8 +167,7 @@ export async function PATCH(
     .eq("id", appointmentId)
     .eq("clinic_id", ctx.clinicId);
 
-  if (updErr)
-    return NextResponse.json({ error: updErr.message }, { status: 500 });
+  if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
 
   return NextResponse.json({ ok: true }, { status: 200 });
 }
