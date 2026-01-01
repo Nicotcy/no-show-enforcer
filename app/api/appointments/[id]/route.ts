@@ -67,7 +67,7 @@ export async function PATCH(
   const currentStatus = normalizeStatus(appt.status) ?? "scheduled";
   const hasCheckedIn = Boolean(appt.checked_in_at);
 
-  // Action: check_in (guarda timestamp real)
+  // Action: check_in (guarda timestamp real + limpia flags de cobro)
   if (action === "check_in") {
     const transitionErr = validateStatusTransition(currentStatus, "checked_in", {
       hasCheckedIn,
@@ -81,6 +81,9 @@ export async function PATCH(
       .update({
         checked_in_at: new Date().toISOString(),
         status: "checked_in",
+        // si se hace check-in, nunca debe quedar nada de cobro pendiente/charged
+        no_show_fee_pending: false,
+        no_show_fee_charged: false,
       })
       .eq("id", appointmentId)
       .eq("clinic_id", ctx.clinicId);
@@ -106,37 +109,43 @@ export async function PATCH(
     return NextResponse.json({ error: transitionErr }, { status: 400 });
   }
 
-const updatePayload: Record<string, any> = { status: nextStatus };
+  const updatePayload: Record<string, any> = { status: nextStatus };
 
-// si se cancela o se hace check-in, nunca debe quedar nada de cobro pendiente/charged
-if (nextStatus === "canceled" || nextStatus === "checked_in") {
-  updatePayload.no_show_fee_pending = false;
-  updatePayload.no_show_fee_charged = false;
-}
-
-// coherencia manual = cron
-if (nextStatus === "no_show") {
-  updatePayload.no_show_detected_at = new Date().toISOString();
-
-  // pending solo si: auto_charge_enabled=true y fee>0 y NO está excusado
-  const excused = Boolean(appt.no_show_excused);
-  if (excused) {
+  // Cancel: registra hora y limpia cobros
+  if (nextStatus === "canceled") {
+    updatePayload.cancelled_at = new Date().toISOString();
     updatePayload.no_show_fee_pending = false;
     updatePayload.no_show_fee_charged = false;
-  } else {
-    try {
-      const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
-      updatePayload.no_show_fee_pending =
-        rule.autoChargeEnabled && rule.feeCents > 0;
+  }
+
+  // Checked_in por set_status (por si alguien lo llama así): limpia cobros también
+  if (nextStatus === "checked_in") {
+    updatePayload.no_show_fee_pending = false;
+    updatePayload.no_show_fee_charged = false;
+  }
+
+  // No-show: coherencia manual = cron
+  if (nextStatus === "no_show") {
+    updatePayload.no_show_detected_at = new Date().toISOString();
+
+    const excused = Boolean(appt.no_show_excused);
+    if (excused) {
+      updatePayload.no_show_fee_pending = false;
       updatePayload.no_show_fee_charged = false;
-    } catch (e: any) {
-      return NextResponse.json(
-        { error: e?.message || "Failed to load clinic charge rule" },
-        { status: 500 }
-      );
+    } else {
+      try {
+        const rule = await getClinicChargeRule(ctx.supabaseAdmin, ctx.clinicId);
+        updatePayload.no_show_fee_pending =
+          rule.autoChargeEnabled && rule.feeCents > 0;
+        updatePayload.no_show_fee_charged = false;
+      } catch (e: any) {
+        return NextResponse.json(
+          { error: e?.message || "Failed to load clinic charge rule" },
+          { status: 500 }
+        );
+      }
     }
   }
-}
 
   const { error: updErr } = await ctx.supabaseAdmin
     .from("appointments")
