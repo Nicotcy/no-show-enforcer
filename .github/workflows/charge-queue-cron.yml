@@ -1,0 +1,14 @@
+name: charge-queue-cron
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call cron endpoint
+        run: |
+          curl -sS "${{ secrets.CHARGE_QUEUE_CRON_URL }}" | head -c 800
