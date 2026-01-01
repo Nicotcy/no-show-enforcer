@@ -21,10 +21,6 @@ function isAuthorized(req: Request) {
   );
 }
 
-// Re-queue locks “atascados” (si un run muere a mitad)
-const STALE_LOCK_MINUTES = 15;
-
-// Cuántas citas reservamos por ejecución
 const BATCH_SIZE = 100;
 
 export async function GET(req: Request) {
@@ -33,19 +29,18 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const now = new Date();
-    const staleBefore = new Date(now.getTime() - STALE_LOCK_MINUTES * 60 * 1000).toISOString();
+    const nowIso = new Date().toISOString();
 
-    // 1) candidatos: pending && !charged && !excused && status=no_show
-    //    y sin lock o lock “stale”
+    // 1) Candidatos simples y robustos:
+    // pending=true && charged=false && status=no_show && (excused null/false) && processing_at IS NULL
     const { data: candidates, error: candError } = await supabase
       .from("appointments")
-      .select("id, clinic_id, no_show_fee_processing_at")
+      .select("id, clinic_id")
       .eq("no_show_fee_pending", true)
       .eq("no_show_fee_charged", false)
       .eq("status", "no_show")
       .or("no_show_excused.is.null,no_show_excused.eq.false")
-      .or(`no_show_fee_processing_at.is.null,no_show_fee_processing_at.lt.${staleBefore}`)
+      .is("no_show_fee_processing_at", null)
       .limit(BATCH_SIZE);
 
     if (candError) {
@@ -55,19 +50,19 @@ export async function GET(req: Request) {
       );
     }
 
-    const idsAll = (candidates ?? []).map((c: any) => c.id as string);
+    const candidateIds = (candidates ?? []).map((c: any) => c.id as string);
     const clinicIds = Array.from(
       new Set((candidates ?? []).map((c: any) => c.clinic_id as string))
     );
 
-    if (idsAll.length === 0) {
+    if (candidateIds.length === 0) {
       return NextResponse.json(
-        { step: "done", now: now.toISOString(), candidateCount: 0, queuedCount: 0, queuedIds: [] },
+        { step: "done", now: nowIso, candidateCount: 0, eligibleCount: 0, queuedCount: 0 },
         { status: 200 }
       );
     }
 
-    // 2) seguridad extra: si el clinic desactiva auto_charge o fee=0, NO lo encolamos
+    // 2) Seguridad extra: si la clínica ha cambiado settings (auto_charge off o fee 0), no encolamos
     const { data: settingsRows, error: settingsError } = await supabase
       .from("clinic_settings")
       .select("clinic_id, auto_charge_enabled, no_show_fee_cents")
@@ -80,10 +75,7 @@ export async function GET(req: Request) {
       );
     }
 
-    const settingsMap = new Map<
-      string,
-      { auto: boolean; fee: number }
-    >();
+    const settingsMap = new Map<string, { auto: boolean; fee: number }>();
     for (const r of settingsRows ?? []) {
       settingsMap.set(String((r as any).clinic_id), {
         auto: Boolean((r as any).auto_charge_enabled),
@@ -102,23 +94,22 @@ export async function GET(req: Request) {
       return NextResponse.json(
         {
           step: "done",
-          now: now.toISOString(),
-          candidateCount: idsAll.length,
+          now: nowIso,
+          candidateCount: candidateIds.length,
+          eligibleCount: 0,
           queuedCount: 0,
-          queuedIds: [],
-          note: "Candidates existed, but none were eligible with current clinic_settings.",
+          note: "No eligible rows after checking clinic_settings (auto_charge_enabled/fee).",
         },
         { status: 200 }
       );
     }
 
-    // 3) lock/reserva: marcamos processing_at y last_attempt_at
-    //    (todavía NO cobramos, solo reservamos para un futuro worker/stripe)
+    // 3) Lock: marcamos processing_at + last_attempt_at
     const { data: locked, error: lockError } = await supabase
       .from("appointments")
       .update({
-        no_show_fee_processing_at: now.toISOString(),
-        no_show_fee_last_attempt_at: now.toISOString(),
+        no_show_fee_processing_at: nowIso,
+        no_show_fee_last_attempt_at: nowIso,
       })
       .in("id", eligibleIds)
       .select("id");
@@ -132,17 +123,15 @@ export async function GET(req: Request) {
 
     const lockedIds = (locked ?? []).map((x: any) => x.id as string);
 
-    // 4) log global en cron_runs (clinic_id null): mismo patrón que no-shows
-    //    Si tu tabla cron_runs no permite clinic_id null, dime y lo adaptamos.
+    // 4) Intento de log (si falla, NO rompemos el job)
     const { error: logError } = await supabase.from("cron_runs").insert({
       clinic_id: null,
       job: "charge-queue",
-      candidate_count: idsAll.length,
+      candidate_count: candidateIds.length,
       updated_count: lockedIds.length,
       details: {
         ok: true,
-        now: now.toISOString(),
-        staleLockMinutes: STALE_LOCK_MINUTES,
+        now: nowIso,
         batchSize: BATCH_SIZE,
         eligibleIds,
         lockedIds,
@@ -152,8 +141,8 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         step: "done",
-        now: now.toISOString(),
-        candidateCount: idsAll.length,
+        now: nowIso,
+        candidateCount: candidateIds.length,
         eligibleCount: eligibleIds.length,
         queuedCount: lockedIds.length,
         queuedIds: lockedIds,
