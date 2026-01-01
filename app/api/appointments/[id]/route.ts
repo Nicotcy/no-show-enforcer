@@ -94,22 +94,33 @@ export async function PATCH(
         { status: 400 }
       );
     }
-
-    const reason = typeof body.reason === "string" ? body.reason.trim() : null;
-
-    const { error: updErr } = await ctx.supabaseAdmin
-      .from("appointments")
-      .update({
-        no_show_excused: true,
-        no_show_excuse_reason: reason,
-      })
-      .eq("id", appointmentId)
-      .eq("clinic_id", ctx.clinic_id);
-
-    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
-
-    return NextResponse.json({ ok: true }, { status: 200 });
+    // Excuse
+if (action === "excuse") {
+  if (currentStatus !== "no_show") {
+    return NextResponse.json(
+      { error: "Only no-show appointments can be excused." },
+      { status: 400 }
+    );
   }
+
+  const reason = typeof body.reason === "string" ? body.reason.trim() : null;
+
+  const { error: updErr } = await ctx.supabaseAdmin
+    .from("appointments")
+    .update({
+      no_show_excused: true,
+      no_show_excuse_reason: reason,
+      // al excusar, anulamos cualquier intento de cobro
+      no_show_fee_pending: false,
+      no_show_fee_charged: false,
+    })
+    .eq("id", appointmentId)
+    .eq("clinic_id", ctx.clinic_id);
+
+  if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+  return NextResponse.json({ ok: true }, { status: 200 });
+}
 
   // Check-in
   if (action === "check_in") {
