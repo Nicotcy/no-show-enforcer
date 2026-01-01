@@ -8,8 +8,9 @@ on:
 jobs:
   run-crons:
     runs-on: ubuntu-latest
+
     steps:
-       - name: Check required secrets
+      - name: Check required secrets
         run: |
           if [ -z "${{ secrets.CRON_BASE_URL }}" ]; then
             echo "Missing secret: CRON_BASE_URL"
