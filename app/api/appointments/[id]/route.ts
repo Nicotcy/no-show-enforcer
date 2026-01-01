@@ -1,111 +1,138 @@
 import { NextResponse } from "next/server";
-import { getServerContext } from "@/lib/server/context";
+import { cookies } from "next/headers";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
+
+import {
+  ALLOWED_STATUSES,
+  normalizeStatus,
+  validateStatusTransition,
+} from "@/lib/appointments/status";
 
 export const runtime = "nodejs";
 
-const ALLOWED_STATUSES = [
-  "scheduled",
-  "checked_in",
-  "late",
-  "no_show",
-  "canceled",
-  "late_cancel",
-] as const;
+type CookieToSet = { name: string; value: string; options?: CookieOptions };
 
-type Status = (typeof ALLOWED_STATUSES)[number];
+async function getContext() {
+  const cookieStore = await cookies();
 
-function normalizeStatus(input: unknown): Status | null {
-  const s = String(input ?? "").trim().toLowerCase();
-  return (ALLOWED_STATUSES as readonly string[]).includes(s) ? (s as Status) : null;
-}
+  const supabaseAuth = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL as string,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet: CookieToSet[]) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
 
-function minutesUntil(start: Date, now: Date) {
-  return Math.floor((start.getTime() - now.getTime()) / 60000);
-}
+  const {
+    data: { user },
+  } = await supabaseAuth.auth.getUser();
+  if (!user) return null;
 
-// Parse starts_at as UTC.
-// If it has no timezone suffix (Z or +/-hh:mm), treat it as UTC and append Z.
-function parseStartsAtUtc(raw: unknown): Date | null {
-  const s = String(raw ?? "").trim();
-  if (!s) return null;
+  const supabaseAdmin = createClient(
+    process.env.SUPABASE_URL as string,
+    process.env.SUPABASE_SERVICE_ROLE_KEY as string
+  );
 
-  const hasTz =
-    s.endsWith("Z") || /[+\-]\d{2}:\d{2}$/.test(s) || /[+\-]\d{2}\d{2}$/.test(s);
+  const { data: profile, error: profileErr } = await supabaseAdmin
+    .from("profiles")
+    .select("clinic_id")
+    .eq("id", user.id)
+    .single();
 
-  const iso = hasTz ? s : `${s}Z`;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return d;
+  if (profileErr) return { error: `Failed to read profile: ${profileErr.message}` } as const;
+  if (!profile?.clinic_id) return null;
+
+  return { user, clinic_id: profile.clinic_id as string, supabaseAdmin } as const;
 }
 
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  let ctx;
-  try {
-    ctx = await getServerContext();
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "Failed to load context" },
-      { status: 500 }
-    );
+  const ctx = await getContext();
+  if (!ctx || "error" in ctx) {
+    const msg = ctx && "error" in ctx ? ctx.error : "Unauthorized";
+    return NextResponse.json({ error: msg }, { status: 401 });
   }
-
-  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id: appointmentId } = await params;
 
   const body = await req.json().catch(() => ({} as any));
-  const action = String(body.action ?? "").trim(); // "check_in" | "" (default set_status)
+  const action = String(body.action ?? "").trim(); // "excuse" | "check_in" | "" (default set_status)
 
   // Load current appointment (must belong to this clinic)
-  const { data: apptRows, error: apptErr } = await ctx.supabaseAdmin
+  const { data: appt, error: apptErr } = await ctx.supabaseAdmin
     .from("appointments")
-    .select("id, clinic_id, status, starts_at, checked_in_at, no_show_excused, cancelled_at")
+    .select("id,clinic_id,status,checked_in_at,no_show_excused")
     .eq("id", appointmentId)
-    .eq("clinic_id", ctx.clinicId)
+    .eq("clinic_id", ctx.clinic_id)
     .limit(1);
 
   if (apptErr) return NextResponse.json({ error: apptErr.message }, { status: 500 });
 
-  const current = apptRows?.[0];
+  const current = appt?.[0];
   if (!current) return NextResponse.json({ error: "Appointment not found" }, { status: 404 });
 
   const currentStatus = normalizeStatus(current.status) ?? "scheduled";
   const hasCheckedIn = Boolean(current.checked_in_at);
 
-  // Terminal rule: canceled and late_cancel are terminal
-  if (currentStatus === "canceled" || currentStatus === "late_cancel") {
-    return NextResponse.json(
-      { error: "Canceled appointments cannot be modified." },
-      { status: 400 }
-    );
-  }
-
-  // Check-in (HARDENED): only scheduled/late can be checked-in
-  if (action === "check_in") {
-    if (!(currentStatus === "scheduled" || currentStatus === "late")) {
+  // Excuse
+  if (action === "excuse") {
+    if (currentStatus !== "no_show") {
       return NextResponse.json(
-        { error: "Only scheduled/late appointments can be checked-in." },
+        { error: "Only no-show appointments can be excused." },
         { status: 400 }
       );
     }
 
-    const { data: updated, error: updErr } = await ctx.supabaseAdmin
+    const reason = typeof body.reason === "string" ? body.reason.trim() : null;
+
+    const { error: updErr } = await ctx.supabaseAdmin
+      .from("appointments")
+      .update({
+        no_show_excused: true,
+        no_show_excuse_reason: reason,
+      })
+      .eq("id", appointmentId)
+      .eq("clinic_id", ctx.clinic_id);
+
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+    return NextResponse.json({ ok: true }, { status: 200 });
+  }
+
+  // Check-in
+  if (action === "check_in") {
+    const transitionErr = validateStatusTransition(currentStatus, "checked_in", {
+      hasCheckedIn,
+    });
+
+    if (transitionErr) {
+      return NextResponse.json({ error: transitionErr }, { status: 400 });
+    }
+
+    const { error: updErr } = await ctx.supabaseAdmin
       .from("appointments")
       .update({
         checked_in_at: new Date().toISOString(),
         status: "checked_in",
       })
       .eq("id", appointmentId)
-      .eq("clinic_id", ctx.clinicId)
-      .select("*")
-      .maybeSingle();
+      .eq("clinic_id", ctx.clinic_id);
 
     if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
 
-    return NextResponse.json({ ok: true, appointment: updated }, { status: 200 });
+    return NextResponse.json({ ok: true }, { status: 200 });
   }
 
   // Default: set_status
@@ -117,82 +144,21 @@ export async function PATCH(
     );
   }
 
-  // Rule: if already checked in, cannot be set to no_show
-  if (hasCheckedIn && nextStatus === "no_show") {
-    return NextResponse.json(
-      { error: "Checked-in appointments cannot be marked as no-show." },
-      { status: 400 }
-    );
+  const transitionErr = validateStatusTransition(currentStatus, nextStatus, {
+    hasCheckedIn,
+  });
+
+  if (transitionErr) {
+    return NextResponse.json({ error: transitionErr }, { status: 400 });
   }
 
-  // Status immutability rules
-  if (currentStatus === "checked_in" && nextStatus !== "checked_in") {
-    return NextResponse.json(
-      { error: "Checked-in appointments cannot change status." },
-      { status: 400 }
-    );
-  }
-
-  if (currentStatus === "no_show" && nextStatus !== "no_show") {
-    return NextResponse.json(
-      { error: "No-show appointments cannot change status (use Excuse)." },
-      { status: 400 }
-    );
-  }
-
-  // Implement late cancel when client requests "canceled"
-  let statusToSave: Status = nextStatus;
-  const patch: Record<string, any> = {};
-
-  if (nextStatus === "canceled") {
-    const now = new Date();
-    patch.cancelled_at = now.toISOString();
-
-    // Load clinic setting late_cancel_window_minutes
-    const { data: settingsRow, error: settingsErr } = await ctx.supabaseAdmin
-      .from("clinic_settings")
-      .select("late_cancel_window_minutes")
-      .eq("clinic_id", ctx.clinicId)
-      .maybeSingle();
-
-    if (settingsErr) {
-      return NextResponse.json(
-        { error: `Failed to read clinic settings: ${settingsErr.message}` },
-        { status: 500 }
-      );
-    }
-
-    const windowMinsRaw = Number(settingsRow?.late_cancel_window_minutes ?? 60);
-    const windowMins = Number.isFinite(windowMinsRaw)
-      ? Math.max(0, Math.min(10080, Math.floor(windowMinsRaw)))
-      : 60;
-
-    const start = parseStartsAtUtc(current.starts_at);
-
-    if (start && windowMins > 0) {
-      const minsUntil = minutesUntil(start, now);
-
-      if (minsUntil >= 0 && minsUntil <= windowMins) {
-        statusToSave = "late_cancel";
-      } else {
-        statusToSave = "canceled";
-      }
-    } else {
-      statusToSave = "canceled";
-    }
-  }
-
-  patch.status = statusToSave;
-
-  const { data: updated, error: updErr } = await ctx.supabaseAdmin
+  const { error: updErr } = await ctx.supabaseAdmin
     .from("appointments")
-    .update(patch)
+    .update({ status: nextStatus })
     .eq("id", appointmentId)
-    .eq("clinic_id", ctx.clinicId)
-    .select("*")
-    .maybeSingle();
+    .eq("clinic_id", ctx.clinic_id);
 
   if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
 
-  return NextResponse.json({ ok: true, appointment: updated }, { status: 200 });
+  return NextResponse.json({ ok: true }, { status: 200 });
 }
