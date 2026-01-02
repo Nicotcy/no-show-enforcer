@@ -14,7 +14,6 @@ export default function AppNav() {
 
   async function signOut() {
     await supabase.auth.signOut();
-    router.refresh();
     router.push("/login");
   }
 
@@ -30,6 +29,7 @@ export default function AppNav() {
     >
       <Link href="/dashboard">Dashboard</Link>
       <Link href="/settings">Settings</Link>
+      <Link href="/billing">Billing</Link>
 
       <button
         onClick={signOut}
