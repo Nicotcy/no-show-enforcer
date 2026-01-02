@@ -13,33 +13,39 @@ type Appointment = {
   no_show_excused: boolean | null;
   no_show_fee_charged: boolean | null;
   no_show_fee_pending: boolean | null;
+  no_show_fee_processing_at: string | null;
+  no_show_fee_attempt_count: number | null;
+  no_show_fee_last_error: string | null;
 };
 
-function toLocalDisplay(isoOrTs: string) {
+function toLocalDisplay(iso: string) {
   try {
-    const d = new Date(isoOrTs);
-    if (Number.isNaN(d.getTime())) return isoOrTs;
-    return d.toLocaleString();
+    return new Date(iso).toLocaleString();
   } catch {
-    return isoOrTs;
+    return iso;
   }
 }
 
-function isPast(startsAtIso: string) {
-  const t = new Date(startsAtIso).getTime();
-  if (Number.isNaN(t)) return false;
-  return t < Date.now();
-}
-
-function isFuture(startsAtIso: string) {
-  const t = new Date(startsAtIso).getTime();
-  if (Number.isNaN(t)) return false;
-  return t > Date.now();
-}
-
 function FeeLabel(a: Appointment) {
-  if (a.no_show_fee_charged) return "Charged";
-  if (a.no_show_fee_pending) return "Pending";
+  if (a.no_show_fee_charged) return "charged";
+
+  // Si está lockeada para cobro, mostramos processing aunque siga pending
+  if (a.no_show_fee_processing_at) return "processing";
+
+  if (a.no_show_fee_pending) {
+    const attempts =
+      typeof a.no_show_fee_attempt_count === "number" ? a.no_show_fee_attempt_count : 0;
+
+    if (a.no_show_fee_last_error) {
+      if (a.no_show_fee_last_error === "MAX_ATTEMPTS_REACHED") {
+        return attempts > 0 ? `failed (max, attempts: ${attempts})` : "failed (max)";
+      }
+      return attempts > 0 ? `pending (attempts: ${attempts})` : "pending";
+    }
+
+    return attempts > 0 ? `pending (attempts: ${attempts})` : "pending";
+  }
+
   return "-";
 }
 
@@ -53,13 +59,17 @@ function AppointmentRow({
   onCheckIn,
   onUpdateStatus,
   onExcuse,
+  onUndo,
 }: {
   a: Appointment;
   onCheckIn: (id: string) => void;
   onUpdateStatus: (id: string, status: AllowedStatus) => void;
   onExcuse: (id: string) => void;
+  onUndo: (id: string) => void;
 }) {
-  const future = isFuture(a.starts_at);
+  const now = Date.now();
+  const starts = new Date(a.starts_at).getTime();
+  const future = starts > now;
 
   const disabledTitle =
     "Solo se puede marcar cuando la cita ya ha empezado (después de la hora de inicio).";
@@ -116,14 +126,11 @@ function AppointmentRow({
           Excuse
         </button>
 
-        {canUndo ? (
-          <button
-            onClick={() => onUpdateStatus(a.id, "scheduled")}
-            title="Undo: volver a scheduled"
-          >
+        {canUndo && (
+          <button onClick={() => onUndo(a.id)} style={{ marginRight: 10 }}>
             Undo
           </button>
-        ) : null}
+        )}
       </td>
     </tr>
   );
@@ -140,68 +147,63 @@ export default function DashboardClient() {
   const [startsAtLocal, setStartsAtLocal] = useState("");
 
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
 
-  const dateInputRef = useRef<HTMLInputElement | null>(null);
-
-  function openDatePicker() {
-    const el = dateInputRef.current;
-    if (!el) return;
-    const anyEl = el as any;
-    if (typeof anyEl.showPicker === "function") anyEl.showPicker();
-    else el.focus();
-  }
-
-  async function loadAppointments() {
+  async function fetchAppointments() {
     setLoading(true);
     setError(null);
     try {
       const res = await fetch("/api/appointments", { cache: "no-store" });
       const json = await res.json().catch(() => ({}));
-
       if (!res.ok) {
+        setError(json?.error || `Failed to load (${res.status})`);
         setAppointments([]);
-        setError(json?.error || `Failed to load appointments (${res.status})`);
         return;
       }
-
-      const list: Appointment[] = Array.isArray(json)
-        ? json
-        : Array.isArray(json?.appointments)
-          ? json.appointments
-          : [];
-
-      setAppointments(list);
+      setAppointments(Array.isArray(json) ? json : json?.appointments || []);
     } catch (e: any) {
+      setError(e?.message || "Failed to load");
       setAppointments([]);
-      setError(e?.message || "Failed to load appointments");
     } finally {
       setLoading(false);
     }
   }
 
-  async function addAppointment() {
+  useEffect(() => {
+    fetchAppointments();
+    const t = setInterval(fetchAppointments, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const nowTs = Date.now();
+
+  const upcoming = useMemo(() => {
+    return appointments
+      .filter((a) => new Date(a.starts_at).getTime() > nowTs)
+      .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
+  }, [appointments, nowTs]);
+
+  const past = useMemo(() => {
+    return appointments
+      .filter((a) => new Date(a.starts_at).getTime() <= nowTs)
+      .sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime());
+  }, [appointments, nowTs]);
+
+  async function createAppointment() {
+    const name = patientName.trim();
+    if (!name) return;
+
     if (creatingLockRef.current) return;
     creatingLockRef.current = true;
 
-    setError(null);
-    setInfo(null);
-
-    const name = patientName.trim();
-    if (!name) {
-      setError("Patient name is required.");
-      creatingLockRef.current = false;
-      return;
-    }
-    if (!startsAtLocal) {
-      setError("Start time is required.");
-      creatingLockRef.current = false;
-      return;
-    }
-
     setCreating(true);
+    setError(null);
+
     try {
-      const startsAtIso = new Date(startsAtLocal).toISOString();
+      const startsAtIso = startsAtLocal ? new Date(startsAtLocal).toISOString() : null;
+      if (!startsAtIso) {
+        setError("Pick a date/time");
+        return;
+      }
 
       const res = await fetch("/api/appointments", {
         method: "POST",
@@ -217,9 +219,7 @@ export default function DashboardClient() {
 
       setPatientName("");
       setStartsAtLocal("");
-
-      setInfo("Appointment created.");
-      await loadAppointments();
+      await fetchAppointments();
     } catch (e: any) {
       setError(e?.message || "Failed to add");
     } finally {
@@ -228,219 +228,181 @@ export default function DashboardClient() {
     }
   }
 
-  async function updateStatus(id: string, status: AllowedStatus) {
+  async function onCheckIn(id: string) {
     setError(null);
-    setInfo(null);
-    try {
-      const res = await fetch(`/api/appointments/${id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(json?.error || `Failed to update (${res.status})`);
-        return;
-      }
-
-      setInfo("Updated.");
-      await loadAppointments();
-    } catch (e: any) {
-      setError(e?.message || "Failed to update");
-    }
-  }
-
-  async function checkIn(id: string) {
-    setError(null);
-    setInfo(null);
     try {
       const res = await fetch(`/api/appointments/${id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "check_in" }),
       });
-
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(json?.error || `Failed to check-in (${res.status})`);
+        setError(json?.error || `Failed (${res.status})`);
         return;
       }
-
-      setInfo("Checked in.");
-      await loadAppointments();
+      await fetchAppointments();
     } catch (e: any) {
-      setError(e?.message || "Failed to check-in");
+      setError(e?.message || "Failed");
     }
   }
 
-  async function excuseNoShow(id: string) {
+  async function onUpdateStatus(id: string, status: AllowedStatus) {
     setError(null);
-    setInfo(null);
     try {
-      const reason = prompt("Reason (optional):") || null;
+      const res = await fetch(`/api/appointments/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(json?.error || `Failed (${res.status})`);
+        return;
+      }
+      await fetchAppointments();
+    } catch (e: any) {
+      setError(e?.message || "Failed");
+    }
+  }
 
+  async function onExcuse(id: string) {
+    setError(null);
+    try {
+      const reason = prompt("Reason? (optional)") || "";
       const res = await fetch(`/api/appointments/${id}/excuse`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ reason }),
       });
-
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(json?.error || `Failed to excuse (${res.status})`);
+        setError(json?.error || `Failed (${res.status})`);
         return;
       }
-
-      setInfo("No-show excused.");
-      await loadAppointments();
+      await fetchAppointments();
     } catch (e: any) {
-      setError(e?.message || "Failed to excuse");
+      setError(e?.message || "Failed");
     }
   }
 
-  useEffect(() => {
-    loadAppointments();
-
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        loadAppointments();
+  async function onUndo(id: string) {
+    setError(null);
+    try {
+      const res = await fetch(`/api/appointments/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "undo" }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(json?.error || `Failed (${res.status})`);
+        return;
       }
-    }, 15000);
-
-    return () => window.clearInterval(id);
-  }, []);
-
-  const { upcoming, past } = useMemo(() => {
-    const up: Appointment[] = [];
-    const pa: Appointment[] = [];
-
-    for (const a of appointments) {
-      if (isPast(a.starts_at)) pa.push(a);
-      else up.push(a);
+      await fetchAppointments();
+    } catch (e: any) {
+      setError(e?.message || "Failed");
     }
-
-    up.sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
-    pa.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime());
-
-    return { upcoming: up, past: pa };
-  }, [appointments]);
-
-  const tableHeader = (
-    <thead>
-      <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
-        <th style={{ padding: 10 }}>Patient</th>
-        <th style={{ padding: 10 }}>Starts at</th>
-        <th style={{ padding: 10 }}>Status</th>
-        <th style={{ padding: 10 }}>Check-in time</th>
-        <th style={{ padding: 10 }}>Fee</th>
-        <th style={{ padding: 10 }}>Actions</th>
-      </tr>
-    </thead>
-  );
+  }
 
   return (
-    <div style={{ padding: 24 }}>
-      <h2 style={{ fontSize: 28, marginBottom: 20 }}>Dashboard</h2>
+    <div style={{ padding: 20 }}>
+      <h1 style={{ marginBottom: 10 }}>Dashboard</h1>
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
-        <input
-          placeholder="Patient name"
-          value={patientName}
-          onChange={(e) => setPatientName(e.target.value)}
-          style={{ padding: 10, minWidth: 240 }}
-          disabled={creating}
-        />
-
-        <input
-          ref={dateInputRef}
-          type="datetime-local"
-          value={startsAtLocal}
-          onChange={(e) => setStartsAtLocal(e.target.value)}
-          style={{ padding: 10, border: "1px solid #333" }}
-          disabled={creating}
-        />
-
-        <button
-          type="button"
-          onClick={openDatePicker}
-          style={{ padding: "10px 12px", border: "1px solid #333" }}
-          title="Pick date"
-          disabled={creating}
-        >
-          📅 Pick date
-        </button>
-
-        <button onClick={addAppointment} style={{ padding: "10px 14px" }} disabled={creating}>
-          {creating ? "Adding..." : "Add"}
-        </button>
-
-        <button
-          onClick={loadAppointments}
-          disabled={loading}
-          style={{ padding: "10px 14px" }}
-          title="Reload appointments list"
-        >
-          {loading ? "Loading..." : "Refresh"}
+      <div style={{ marginBottom: 12 }}>
+        <button onClick={fetchAppointments} disabled={loading}>
+          {loading ? "Refreshing..." : "Refresh"}
         </button>
       </div>
 
-      {error && <div style={{ color: "#ff6b6b", marginBottom: 12 }}>{error}</div>}
-      {info && <div style={{ color: "#7ee787", marginBottom: 12 }}>{info}</div>}
+      {error && <div style={{ marginBottom: 10, color: "tomato" }}>{error}</div>}
 
-      <div style={{ marginBottom: 10, opacity: 0.9 }}>
-        Upcoming ({upcoming.length}) · Past ({past.length})
+      <div style={{ marginBottom: 20, padding: 12, border: "1px solid #222" }}>
+        <h2 style={{ marginTop: 0 }}>Add appointment</h2>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            placeholder="Patient name"
+            value={patientName}
+            onChange={(e) => setPatientName(e.target.value)}
+          />
+
+          <input
+            type="datetime-local"
+            value={startsAtLocal}
+            onChange={(e) => setStartsAtLocal(e.target.value)}
+          />
+
+          <button onClick={createAppointment} disabled={creating}>
+            {creating ? "Adding..." : "Add"}
+          </button>
+        </div>
       </div>
 
-      <div style={{ marginBottom: 18, overflowX: "auto" }}>
-        <div style={{ fontSize: 18, margin: "10px 0" }}>Upcoming</div>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
-          {tableHeader}
-          <tbody>
-            {upcoming.map((a) => (
-              <AppointmentRow
-                key={a.id}
-                a={a}
-                onCheckIn={checkIn}
-                onUpdateStatus={updateStatus}
-                onExcuse={excuseNoShow}
-              />
-            ))}
-            {upcoming.length === 0 && !loading && (
-              <tr>
-                <td style={{ padding: 10, opacity: 0.7 }} colSpan={6}>
-                  No upcoming appointments.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <h2>Upcoming</h2>
+      <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 20 }}>
+        <thead>
+          <tr style={{ textAlign: "left", borderBottom: "1px solid #222" }}>
+            <th style={{ padding: 10 }}>Patient</th>
+            <th style={{ padding: 10 }}>Starts at</th>
+            <th style={{ padding: 10 }}>Status</th>
+            <th style={{ padding: 10 }}>Check-in time</th>
+            <th style={{ padding: 10 }}>Fee</th>
+            <th style={{ padding: 10 }}>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {upcoming.map((a) => (
+            <AppointmentRow
+              key={a.id}
+              a={a}
+              onCheckIn={onCheckIn}
+              onUpdateStatus={onUpdateStatus}
+              onExcuse={onExcuse}
+              onUndo={onUndo}
+            />
+          ))}
+          {upcoming.length === 0 && (
+            <tr>
+              <td style={{ padding: 10 }} colSpan={6}>
+                No upcoming appointments.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
 
-      <div style={{ overflowX: "auto" }}>
-        <div style={{ fontSize: 18, margin: "10px 0" }}>Past</div>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
-          {tableHeader}
-          <tbody>
-            {past.map((a) => (
-              <AppointmentRow
-                key={a.id}
-                a={a}
-                onCheckIn={checkIn}
-                onUpdateStatus={updateStatus}
-                onExcuse={excuseNoShow}
-              />
-            ))}
-            {past.length === 0 && !loading && (
-              <tr>
-                <td style={{ padding: 10, opacity: 0.7 }} colSpan={6}>
-                  No past appointments.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <h2>Past</h2>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ textAlign: "left", borderBottom: "1px solid #222" }}>
+            <th style={{ padding: 10 }}>Patient</th>
+            <th style={{ padding: 10 }}>Starts at</th>
+            <th style={{ padding: 10 }}>Status</th>
+            <th style={{ padding: 10 }}>Check-in time</th>
+            <th style={{ padding: 10 }}>Fee</th>
+            <th style={{ padding: 10 }}>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {past.map((a) => (
+            <AppointmentRow
+              key={a.id}
+              a={a}
+              onCheckIn={onCheckIn}
+              onUpdateStatus={onUpdateStatus}
+              onExcuse={onExcuse}
+              onUndo={onUndo}
+            />
+          ))}
+          {past.length === 0 && (
+            <tr>
+              <td style={{ padding: 10 }} colSpan={6}>
+                No past appointments.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
