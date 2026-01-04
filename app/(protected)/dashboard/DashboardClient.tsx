@@ -118,13 +118,37 @@ function AppointmentRow({
           Mark no-show
         </button>
 
-        <button onClick={() => onUpdateStatus(a.id, "canceled")} style={{ marginRight: 10 }}>
-          Cancel
-        </button>
+        <button
+  onClick={() => onUpdateStatus(a.id, "canceled")}
+  disabled={!future}
+  title={!future ? "A past appointment can’t be cancelled." : undefined}
+  style={{
+    marginRight: 10,
+    opacity: future ? 1 : 0.5,
+    cursor: future ? "pointer" : "not-allowed",
+  }}
+>
+  Cancel
+</button>
 
-        <button onClick={() => onExcuse(a.id)} style={{ marginRight: 10 }}>
-          Excuse
-        </button>
+
+<button
+  onClick={() => onExcuse(a.id)}
+  disabled={a.status !== "no_show"}
+  title={
+    a.status !== "no_show"
+      ? "Only no-show appointments can be excused."
+      : undefined
+  }
+  style={{
+    marginRight: 10,
+    opacity: a.status === "no_show" ? 1 : 0.5,
+    cursor: a.status === "no_show" ? "pointer" : "not-allowed",
+  }}
+>
+  Excuse
+</button>
+
 
         {canUndo && (
           <button onClick={() => onUndo(a.id)} style={{ marginRight: 10 }}>
