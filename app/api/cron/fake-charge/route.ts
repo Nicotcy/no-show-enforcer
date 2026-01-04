@@ -24,13 +24,12 @@ function isAuthorized(req: Request) {
 const BATCH_SIZE = 100;
 const MAX_ATTEMPTS = 3;
 
-// Fallo determinista ~20% según el último hex del UUID.
-// (sirve para testear retries sin "azar" raro)
+// Solo para tests si pasas ?simulate=1
 function shouldFailDeterministically(id: string) {
   const last = id.trim().slice(-1).toLowerCase();
   const n = parseInt(last, 16);
   if (Number.isNaN(n)) return false;
-  return n % 5 === 0; // 0,5,a,f -> 4/16 = 25% aprox (suficientemente parecido)
+  return n % 5 === 0; // 25% aprox
 }
 
 export async function GET(req: Request) {
@@ -39,9 +38,11 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const url = new URL(req.url);
+    const simulate = url.searchParams.get("simulate") === "1";
+
     const nowIso = new Date().toISOString();
 
-    // 1) Filas lockeadas y pendientes (solo esas)
     const { data: rows, error: fetchError } = await supabase
       .from("appointments")
       .select("id, no_show_fee_attempt_count")
@@ -65,7 +66,6 @@ export async function GET(req: Request) {
     let successCount = 0;
     let failedCount = 0;
 
-    // 2) Procesar uno a uno: así no mezclamos éxitos y fallos en un update masivo
     for (const r of rows as any[]) {
       const id = String(r.id);
       const prevAttempts =
@@ -74,7 +74,7 @@ export async function GET(req: Request) {
           : 0;
       const nextAttempts = prevAttempts + 1;
 
-      // Si ya alcanzó el máximo, liberamos lock y dejamos error “MAX_ATTEMPTS”
+      // Si ya alcanzó máximo, liberamos lock y marcamos error
       if (nextAttempts >= MAX_ATTEMPTS) {
         const { error } = await supabase
           .from("appointments")
@@ -82,7 +82,7 @@ export async function GET(req: Request) {
             no_show_fee_attempt_count: nextAttempts,
             no_show_fee_last_attempt_at: nowIso,
             no_show_fee_last_error: "MAX_ATTEMPTS_REACHED",
-            no_show_fee_processing_at: null, // liberar lock para que no se quede colgado
+            no_show_fee_processing_at: null,
           })
           .eq("id", id);
 
@@ -94,10 +94,9 @@ export async function GET(req: Request) {
         continue;
       }
 
-      const fail = shouldFailDeterministically(id);
+      const fail = simulate ? shouldFailDeterministically(id) : false;
 
       if (fail) {
-        // Fallo simulado: NO cobramos, mantenemos pending=true y charged=false, liberamos lock
         const { error } = await supabase
           .from("appointments")
           .update({
@@ -114,7 +113,6 @@ export async function GET(req: Request) {
 
         failedCount++;
       } else {
-        // Éxito: cobramos y limpiamos pending/lock/error
         const { error } = await supabase
           .from("appointments")
           .update({
@@ -136,12 +134,7 @@ export async function GET(req: Request) {
     }
 
     return NextResponse.json(
-      {
-        ok: true,
-        processedCount: rows.length,
-        successCount,
-        failedCount,
-      },
+      { ok: true, processedCount: rows.length, successCount, failedCount, simulate },
       { status: 200 }
     );
   } catch (e: any) {
