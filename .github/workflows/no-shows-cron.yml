@@ -25,6 +25,10 @@ jobs:
       - name: Call no-shows
         run: |
           curl -sS -f "${{ secrets.CRON_BASE_URL }}/api/cron/no-shows?secret=${{ secrets.CRON_SECRET }}"
+          
+      - name: Call late-cancels
+        run: |
+          curl -sS -f "${{ secrets.CRON_BASE_URL }}/api/cron/late-cancels?secret=${{ secrets.CRON_SECRET }}"
 
       - name: Call charge-queue
         run: |
