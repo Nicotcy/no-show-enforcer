@@ -172,6 +172,20 @@ export async function PATCH(
       }
     }
   }
+  
+  // ✅ Cancel NO permitido en citas pasadas
+  if (nextStatus === "canceled") {
+    const startsAt = appt.starts_at as string | null | undefined;
+    if (startsAt) {
+      const startsMs = new Date(startsAt).getTime();
+      if (!Number.isNaN(startsMs) && startsMs <= Date.now()) {
+        return NextResponse.json(
+          { error: "Cannot cancel a past appointment" },
+          { status: 400 }
+        );
+      }
+    }
+  }
 
   const updatePayload: Record<string, any> = { status: nextStatus };
 
