@@ -3,7 +3,7 @@ import { getServerContext } from "@/lib/server/context";
 
 export const runtime = "nodejs";
 
-type View = "pending" | "processing" | "failed" | "charged" | "all";
+type View = "pending" | "processing" | "failed" | "charged" | "all" | "late_cancels";
 
 export async function GET(req: Request) {
   let ctx;
@@ -21,17 +21,15 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const view = (url.searchParams.get("view") || "pending") as View;
 
-  // Base query: solo mi clínica
   let q = ctx.supabaseAdmin
     .from("appointments")
     .select(
-      "id, patient_name, starts_at, status, no_show_excused, no_show_fee_pending, no_show_fee_charged, no_show_fee_processing_at, no_show_fee_attempt_count, no_show_fee_last_error"
+      "id, patient_name, starts_at, status, cancelled_at, late_cancel_detected_at, no_show_excused, no_show_fee_pending, no_show_fee_charged, no_show_fee_processing_at, no_show_fee_attempt_count, no_show_fee_last_error"
     )
     .eq("clinic_id", ctx.clinicId)
     .order("starts_at", { ascending: false })
     .limit(200);
 
-  // Filtrado por “vista” (sin inventar modelo nuevo)
   if (view === "charged") {
     q = q.eq("no_show_fee_charged", true);
   } else if (view === "processing") {
@@ -51,8 +49,8 @@ export async function GET(req: Request) {
       .eq("no_show_fee_charged", false)
       .is("no_show_fee_processing_at", null)
       .is("no_show_fee_last_error", null);
-  } else {
-    // all: nada extra
+  } else if (view === "late_cancels") {
+    q = q.not("late_cancel_detected_at", "is", null);
   }
 
   const { data, error } = await q;
