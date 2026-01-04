@@ -7,6 +7,9 @@ type Appointment = {
   patient_name: string;
   starts_at: string;
   status: string;
+  cancelled_at?: string | null;
+  late_cancel_detected_at?: string | null;
+
   no_show_excused: boolean | null;
   no_show_fee_pending: boolean | null;
   no_show_fee_charged: boolean | null;
@@ -15,7 +18,7 @@ type Appointment = {
   no_show_fee_last_error: string | null;
 };
 
-type View = "pending" | "processing" | "failed" | "charged" | "all";
+type View = "pending" | "processing" | "failed" | "charged" | "all" | "late_cancels";
 
 function toLocal(iso: string) {
   try {
@@ -93,6 +96,7 @@ export default function BillingClient() {
       { key: "processing", label: "Processing" },
       { key: "failed", label: "Failed" },
       { key: "charged", label: "Charged" },
+      { key: "late_cancels", label: "Late cancels" },
       { key: "all", label: "All" },
     ],
     []
@@ -100,7 +104,7 @@ export default function BillingClient() {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
         {tabs.map((t) => (
           <button
             key={t.key}
@@ -141,6 +145,7 @@ export default function BillingClient() {
             <th style={{ padding: 10 }}>Patient</th>
             <th style={{ padding: 10 }}>Starts at</th>
             <th style={{ padding: 10 }}>Status</th>
+            <th style={{ padding: 10 }}>Late cancel</th>
             <th style={{ padding: 10 }}>Fee state</th>
             <th style={{ padding: 10 }}>Attempts</th>
             <th style={{ padding: 10 }}>Last error</th>
@@ -149,14 +154,21 @@ export default function BillingClient() {
         </thead>
         <tbody>
           {rows.map((a) => {
-            const attempts = typeof a.no_show_fee_attempt_count === "number" ? a.no_show_fee_attempt_count : 0;
-            const canRetry = feeState(a) === "failed" || feeState(a) === "pending";
+            const attempts =
+              typeof a.no_show_fee_attempt_count === "number" ? a.no_show_fee_attempt_count : 0;
+
+            const state = feeState(a);
+            const canRetry = state === "failed" || state === "pending";
+
             return (
               <tr key={a.id} style={{ borderBottom: "1px solid #222" }}>
                 <td style={{ padding: 10 }}>{a.patient_name}</td>
                 <td style={{ padding: 10, whiteSpace: "nowrap" }}>{toLocal(a.starts_at)}</td>
                 <td style={{ padding: 10 }}>{a.status}</td>
-                <td style={{ padding: 10 }}>{feeState(a)}</td>
+                <td style={{ padding: 10 }}>
+                  {a.late_cancel_detected_at ? "yes" : "-"}
+                </td>
+                <td style={{ padding: 10 }}>{state}</td>
                 <td style={{ padding: 10 }}>{attempts || "-"}</td>
                 <td style={{ padding: 10 }}>{a.no_show_fee_last_error || "-"}</td>
                 <td style={{ padding: 10, whiteSpace: "nowrap" }}>
@@ -182,7 +194,7 @@ export default function BillingClient() {
 
           {rows.length === 0 && (
             <tr>
-              <td style={{ padding: 10 }} colSpan={7}>
+              <td style={{ padding: 10 }} colSpan={8}>
                 No rows for this view.
               </td>
             </tr>
@@ -191,7 +203,7 @@ export default function BillingClient() {
       </table>
 
       <div style={{ marginTop: 12, opacity: 0.8 }}>
-        Notes: “Retry” just re-queues the item (clears processing/error). The cron pipeline will pick it up.
+        Notes: “Late cancels” is detection only (no money). “Retry” only affects the no-show charging pipeline.
       </div>
     </div>
   );
